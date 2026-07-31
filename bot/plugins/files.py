@@ -48,7 +48,7 @@ async def handle_user_file(_, msg: Message):
             filename = f"video_{file.id}.mp4"
         else:
             filename = f"file_{file.id}"
-
+    filename = filename.replace(" ", "-")  # Replace spaces with underscores
     # Download link (available for every file)
     download_link = f"{Server.BASE_URL}/dl/{file.id}/{filename}"
 
