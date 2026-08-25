@@ -82,6 +82,9 @@ class FastStreamEngine:
                 yield chunk
                 bytes_streamed += len(chunk)
                 chunk_index += 1
+        except asyncio.CancelledError:
+            # Client disconnected or seeked to another position
+            pass
         except Exception as e:
             logger.error(f"Error streaming msg {file_message.id}: {e}")
             raise

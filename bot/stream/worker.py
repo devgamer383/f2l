@@ -36,7 +36,7 @@ class WorkerPool:
                         api_hash=Telegram.API_HASH,
                         bot_token=token,
                         in_memory=True,
-                        sleep_threshold=-1,
+                        sleep_threshold=60,
                         max_concurrent_transmissions=Stream.MAX_CONCURRENT_TRANSMISSIONS,
                     )
                     await worker.start()
