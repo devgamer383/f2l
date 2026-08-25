@@ -61,31 +61,46 @@ async def handle_user_file(_, msg: Message):
 
     formatted_size = format_bytes(file_size)
     can_stream = is_streamable_media(stored_file)
+    ext = os.path.splitext(clean_name)[1].lower()
 
     caption = (
         f"📁 **File Name:** `{clean_name}`\n"
         f"📦 **File Size:** `{formatted_size}`\n"
-        f"⚡ **Stream Protocol:** `RFC 7233 (Parallel Prefetch)`\n\n"
+        f"⚡ **Stream Protocol:** `RFC 7233 (High Speed)`\n\n"
         f"🔗 **Direct Links:**\n"
         f"• **Download:** [Click Here]({download_link})\n"
     )
 
     if can_stream:
-        caption += (
-            f"• **Fast Stream:** [Click Here]({stream_link})\n"
-            f"• **Web Player:** [Click Here]({player_link})\n\n"
-            f"💡 _Tip: Open the Web Player for 1-Click VLC & MX Player links!_"
-        )
-
-        buttons = [
-            [
-                InlineKeyboardButton("⚡ Direct Stream", url=stream_link),
-                InlineKeyboardButton("📥 Fast Download", url=download_link)
-            ],
-            [
-                InlineKeyboardButton("🎬 Open Web Player", url=player_link)
+        if ext in ['.mkv', '.avi', '.mov', '.flv']:
+            caption += (
+                f"• **Direct Stream:** [Click Here]({stream_link})\n"
+                f"• **Web & VLC Player:** [Click Here]({player_link})\n\n"
+                f"💡 _Tip: .MKV video with AC3/DTS is best streamed via the 1-Click VLC / MX Player button inside the player link!_"
+            )
+            buttons = [
+                [
+                    InlineKeyboardButton("⚡ Direct Stream", url=stream_link),
+                    InlineKeyboardButton("📥 Fast Download", url=download_link)
+                ],
+                [
+                    InlineKeyboardButton("🎬 Open in VLC / Web Player", url=player_link)
+                ]
             ]
-        ]
+        else:
+            caption += (
+                f"• **Fast Stream:** [Click Here]({stream_link})\n"
+                f"• **Web Player:** [Click Here]({player_link})\n"
+            )
+            buttons = [
+                [
+                    InlineKeyboardButton("⚡ Direct Stream", url=stream_link),
+                    InlineKeyboardButton("📥 Fast Download", url=download_link)
+                ],
+                [
+                    InlineKeyboardButton("🎬 Open Web Player", url=player_link)
+                ]
+            ]
     else:
         buttons = [
             [

@@ -13,7 +13,7 @@ class FastStreamEngine:
     """
     High-Performance MTProto Stream Engine.
     Uses continuous persistent MTProto streaming pipelines, smart RAM chunk caching
-    for instant 0ms media header probes, and multi-worker client round-robin.
+    for instant 0ms media header probes, and multi-worker client round-robin with automatic fallback.
     """
 
     async def stream_file_range(
@@ -44,49 +44,64 @@ class FastStreamEngine:
                     yield chunk
                 return
 
-        client = await worker_pool.get_client()
+        # Prepare client list to try (selected worker, then primary bot as fallback)
+        selected_client = await worker_pool.get_client()
+        clients_to_try = [selected_client]
+        if worker_pool.primary_bot and worker_pool.primary_bot != selected_client:
+            clients_to_try.append(worker_pool.primary_bot)
+
         bytes_streamed = 0
         chunk_index = 0
 
-        try:
-            async for chunk in client.stream_media(
-                file_message,
-                offset=offset_chunks,
-                limit=chunks_to_stream,
-            ):
-                if not chunk:
+        for client in clients_to_try:
+            try:
+                bytes_streamed = 0
+                chunk_index = 0
+                async for chunk in client.stream_media(
+                    file_message,
+                    offset=offset_chunks,
+                    limit=chunks_to_stream,
+                ):
+                    if not chunk:
+                        break
+
+                    # Cache initial metadata chunks and single chunks in memory
+                    current_chunk_pos = offset_chunks + chunk_index
+                    if current_chunk_pos == 0 or chunks_to_stream == 1:
+                        await chunk_cache.set(f"{file_message.id}_{current_chunk_pos}", chunk)
+
+                    # Trim first chunk if starting in the middle
+                    if chunk_index == 0:
+                        trim_start = start_byte % chunk_size
+                        if trim_start > 0:
+                            chunk = chunk[trim_start:]
+
+                    remaining_bytes = content_length - bytes_streamed
+                    if remaining_bytes <= 0:
+                        break
+
+                    # Trim last chunk if ending in the middle
+                    if len(chunk) > remaining_bytes:
+                        chunk = chunk[:remaining_bytes]
+
+                    if not chunk:
+                        break
+
+                    yield chunk
+                    bytes_streamed += len(chunk)
+                    chunk_index += 1
+                
+                # If streaming completed or was started successfully, break
+                if bytes_streamed > 0 or chunks_to_stream == 0:
                     break
 
-                # Cache initial metadata chunks and single chunks in memory
-                current_chunk_pos = offset_chunks + chunk_index
-                if current_chunk_pos == 0 or chunks_to_stream == 1:
-                    await chunk_cache.set(f"{file_message.id}_{current_chunk_pos}", chunk)
-
-                # Trim first chunk if starting in the middle
-                if chunk_index == 0:
-                    trim_start = start_byte % chunk_size
-                    if trim_start > 0:
-                        chunk = chunk[trim_start:]
-
-                remaining_bytes = content_length - bytes_streamed
-                if remaining_bytes <= 0:
-                    break
-
-                # Trim last chunk if ending in the middle
-                if len(chunk) > remaining_bytes:
-                    chunk = chunk[:remaining_bytes]
-
-                if not chunk:
-                    break
-
-                yield chunk
-                bytes_streamed += len(chunk)
-                chunk_index += 1
-        except asyncio.CancelledError:
-            # Client disconnected or seeked to another position
-            pass
-        except Exception as e:
-            logger.error(f"Error streaming msg {file_message.id}: {e}")
-            raise
+            except asyncio.CancelledError:
+                # Client disconnected or seeked
+                break
+            except Exception as e:
+                logger.warning(f"Worker client {client.name} stream error on msg {file_message.id}: {e}. Retrying fallback...")
+                if client == clients_to_try[-1]:
+                    logger.error(f"All clients failed for msg {file_message.id}: {e}")
+                    raise
 
 fast_streamer = FastStreamEngine()

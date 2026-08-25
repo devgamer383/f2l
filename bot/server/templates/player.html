@@ -28,6 +28,7 @@
       --text-secondary: #94a3b8;
       --text-muted: #64748b;
       --success: #10b981;
+      --warning: #f59e0b;
       --vlc: #ff8800;
       --mx: #8b5cf6;
       --pot: #eab308;
@@ -53,7 +54,7 @@
 
     .container {
       width: 100%;
-      max-width: 1100px;
+      max-width: 1000px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
@@ -102,6 +103,116 @@
       background: var(--success);
       border-radius: 50%;
       box-shadow: 0 0 8px var(--success);
+    }
+
+    /* MKV / External Stream Hub Banner */
+    .mkv-hub {
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.8) 0%, rgba(15, 23, 42, 0.9) 100%);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      border-radius: 16px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+    }
+
+    .mkv-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    .mkv-icon-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: var(--warning);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      flex-shrink: 0;
+    }
+
+    .mkv-text h2 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .mkv-text p {
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    /* Big Launchers Grid for MKV */
+    .launchers-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
+    .btn-launcher {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: 12px;
+      text-decoration: none;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      font-weight: 600;
+      font-size: 0.92rem;
+    }
+
+    .btn-launcher i {
+      font-size: 1.3rem;
+    }
+
+    .btn-launcher-vlc {
+      background: rgba(255, 136, 0, 0.15);
+      color: #ffaa44;
+      border-color: rgba(255, 136, 0, 0.35);
+    }
+    .btn-launcher-vlc:hover {
+      background: rgba(255, 136, 0, 0.28);
+      transform: translateY(-2px);
+    }
+
+    .btn-launcher-mx {
+      background: rgba(139, 92, 246, 0.15);
+      color: #a78bfa;
+      border-color: rgba(139, 92, 246, 0.35);
+    }
+    .btn-launcher-mx:hover {
+      background: rgba(139, 92, 246, 0.28);
+      transform: translateY(-2px);
+    }
+
+    .btn-launcher-pot {
+      background: rgba(234, 179, 8, 0.15);
+      color: #fde047;
+      border-color: rgba(234, 179, 8, 0.35);
+    }
+    .btn-launcher-pot:hover {
+      background: rgba(234, 179, 8, 0.28);
+      transform: translateY(-2px);
+    }
+
+    .btn-launcher-mpv {
+      background: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      border-color: rgba(168, 85, 247, 0.35);
+    }
+    .btn-launcher-mpv:hover {
+      background: rgba(168, 85, 247, 0.28);
+      transform: translateY(-2px);
     }
 
     /* Player Wrapper */
@@ -157,14 +268,8 @@
       gap: 16px;
     }
 
-    .meta-header {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
     .file-title {
-      font-size: 1.25rem;
+      font-size: 1.2rem;
       font-weight: 700;
       color: var(--text-primary);
       word-break: break-word;
@@ -193,8 +298,8 @@
     /* Action Buttons Grid */
     .actions-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
       margin-top: 6px;
     }
 
@@ -203,26 +308,23 @@
       align-items: center;
       justify-content: center;
       gap: 8px;
-      padding: 12px 18px;
+      padding: 12px 16px;
       border-radius: 12px;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       font-weight: 600;
       text-decoration: none;
       cursor: pointer;
       border: none;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      transition: all 0.2s ease;
     }
 
     .btn-primary {
       background: var(--accent-gradient);
       color: #fff;
-      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
     }
-
     .btn-primary:hover {
       opacity: 0.92;
       transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(59, 130, 246, 0.45);
     }
 
     .btn-download {
@@ -230,29 +332,8 @@
       color: var(--success);
       border: 1px solid rgba(16, 185, 129, 0.3);
     }
-
     .btn-download:hover {
       background: rgba(16, 185, 129, 0.25);
-      transform: translateY(-2px);
-    }
-
-    .btn-vlc {
-      background: rgba(255, 136, 0, 0.15);
-      color: var(--vlc);
-      border: 1px solid rgba(255, 136, 0, 0.3);
-    }
-    .btn-vlc:hover {
-      background: rgba(255, 136, 0, 0.25);
-      transform: translateY(-2px);
-    }
-
-    .btn-mx {
-      background: rgba(139, 92, 246, 0.15);
-      color: var(--mx);
-      border: 1px solid rgba(139, 92, 246, 0.3);
-    }
-    .btn-mx:hover {
-      background: rgba(139, 92, 246, 0.25);
       transform: translateY(-2px);
     }
 
@@ -261,7 +342,6 @@
       color: var(--text-primary);
       border: 1px solid var(--border-color);
     }
-
     .btn-secondary:hover {
       background: rgba(255, 255, 255, 0.08);
       transform: translateY(-2px);
@@ -294,30 +374,11 @@
       opacity: 1;
     }
 
-    /* Footer */
     .footer {
       text-align: center;
       margin-top: 10px;
       font-size: 0.8rem;
       color: var(--text-muted);
-    }
-
-    .footer a {
-      color: var(--accent-primary);
-      text-decoration: none;
-    }
-
-    @media (max-width: 640px) {
-      .actions-grid {
-        grid-template-columns: 1fr 1fr;
-      }
-      .btn {
-        padding: 10px 14px;
-        font-size: 0.82rem;
-      }
-      .file-title {
-        font-size: 1.05rem;
-      }
     }
   </style>
 </head>
@@ -332,9 +393,62 @@
       </div>
       <div class="status-badge">
         <span class="dot"></span>
-        <span>High-Speed Stream</span>
+        <span>High-Speed MTProto</span>
       </div>
     </header>
+
+    {% if isMkv %}
+    <!-- Dedicated MKV / High-Definition External Stream Hub -->
+    <section class="mkv-hub">
+      <div class="mkv-header">
+        <div class="mkv-icon-box">
+          <i class="fa-solid fa-film"></i>
+        </div>
+        <div class="mkv-text">
+          <h2>{{ ext }} High-Definition Media</h2>
+          <p>
+            Web browsers (Chrome/Safari) cannot natively decode <strong>.{{ ext }}</strong> containers or multi-channel AC3/DTS audio tracks.
+            Click below to stream directly at full <strong>1080p/4K</strong> quality in your media player app!
+          </p>
+        </div>
+      </div>
+
+      <!-- 1-Click Launchers -->
+      <div class="launchers-grid">
+        <button class="btn-launcher btn-launcher-vlc" onclick="openInVLC()">
+          <i class="fa-brands fa-vlc"></i>
+          <div>
+            <div>Play in VLC</div>
+            <small style="font-size: 0.72rem; opacity: 0.85;">PC / Mac / Android / iOS</small>
+          </div>
+        </button>
+
+        <button class="btn-launcher btn-launcher-mx" onclick="openInMXPlayer()">
+          <i class="fa-solid fa-play"></i>
+          <div>
+            <div>Play in MX Player</div>
+            <small style="font-size: 0.72rem; opacity: 0.85;">Android App</small>
+          </div>
+        </button>
+
+        <button class="btn-launcher btn-launcher-pot" onclick="openInPotPlayer()">
+          <i class="fa-solid fa-tv"></i>
+          <div>
+            <div>Play in PotPlayer</div>
+            <small style="font-size: 0.72rem; opacity: 0.85;">Windows App</small>
+          </div>
+        </button>
+
+        <button class="btn-launcher btn-launcher-mpv" onclick="openInMPV()">
+          <i class="fa-solid fa-video"></i>
+          <div>
+            <div>Play in MPV</div>
+            <small style="font-size: 0.72rem; opacity: 0.85;">PC / Linux / Mac</small>
+          </div>
+        </button>
+      </div>
+    </section>
+    {% endif %}
 
     <!-- Player Area -->
     <main class="player-wrapper">
@@ -351,19 +465,19 @@
       {% else %}
       <video id="stream-media" controls playsinline preload="auto">
         <source src="{{ mediaLink }}" type="{{ mimeType }}">
-        <p>Your browser does not support HTML5 video streaming.</p>
+        <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
       </video>
       {% endif %}
     </main>
 
     <!-- Meta & Actions Card -->
     <section class="meta-card">
-      <div class="meta-header">
+      <div>
         <h1 class="file-title">{{ filename }}</h1>
-        <div class="file-badges">
+        <div class="file-badges" style="margin-top: 8px;">
           <span class="badge"><i class="fa-solid fa-hard-drive"></i> {{ filesize }}</span>
           <span class="badge"><i class="fa-solid fa-file-lines"></i> {{ mimeType }}</span>
-          <span class="badge"><i class="fa-solid fa-gauge-high"></i> RFC 7233 Range Ready</span>
+          <span class="badge"><i class="fa-solid fa-gauge-high"></i> RFC 7233 Stream Ready</span>
         </div>
       </div>
 
@@ -379,25 +493,17 @@
           <span>Fast Download</span>
         </a>
 
-        <button class="btn btn-vlc" onclick="openInVLC()">
-          <i class="fa-brands fa-vlc"></i>
+        {% if not isMkv %}
+        <button class="btn btn-secondary" onclick="openInVLC()">
+          <i class="fa-brands fa-vlc" style="color: var(--vlc);"></i>
           <span>Open in VLC</span>
         </button>
 
-        <button class="btn btn-mx" onclick="openInMXPlayer()">
-          <i class="fa-solid fa-play"></i>
-          <span>Open in MX Player</span>
+        <button class="btn btn-secondary" onclick="openInMXPlayer()">
+          <i class="fa-solid fa-play" style="color: var(--mx);"></i>
+          <span>MX Player</span>
         </button>
-
-        <button class="btn btn-secondary" onclick="openInPotPlayer()">
-          <i class="fa-solid fa-tv"></i>
-          <span>PotPlayer</span>
-        </button>
-
-        <button class="btn btn-secondary" onclick="openInMPV()">
-          <i class="fa-solid fa-film"></i>
-          <span>MPV Player</span>
-        </button>
+        {% endif %}
       </div>
     </section>
 
@@ -464,27 +570,23 @@
 
     // 1-Click Launchers
     function openInVLC() {
-      const vlcUrl = 'vlc://' + mediaLink;
-      window.location.href = vlcUrl;
-      showToast('Opening in VLC Media Player...');
+      window.location.href = 'vlc://' + mediaLink;
+      showToast('Launching VLC Media Player...');
     }
 
     function openInMXPlayer() {
-      const mxUrl = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end';
-      window.location.href = mxUrl;
-      showToast('Opening in MX Player...');
+      window.location.href = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end';
+      showToast('Launching MX Player...');
     }
 
     function openInPotPlayer() {
-      const potUrl = 'potplayer://' + mediaLink;
-      window.location.href = potUrl;
-      showToast('Opening in PotPlayer...');
+      window.location.href = 'potplayer://' + mediaLink;
+      showToast('Launching PotPlayer...');
     }
 
     function openInMPV() {
-      const mpvUrl = 'mpv://' + mediaLink;
-      window.location.href = mpvUrl;
-      showToast('Opening in MPV Player...');
+      window.location.href = 'mpv://' + mediaLink;
+      showToast('Launching MPV Player...');
     }
   </script>
 </body>

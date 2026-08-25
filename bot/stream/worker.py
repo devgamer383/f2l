@@ -13,11 +13,13 @@ class WorkerPool:
     """
     def __init__(self):
         self.clients: list[Client] = []
+        self.primary_bot: Client | None = None
         self._index = 0
         self._lock = asyncio.Lock()
         self._is_started = False
 
     def register_primary(self, primary_client: Client):
+        self.primary_bot = primary_client
         if primary_client not in self.clients:
             self.clients.append(primary_client)
 
@@ -40,26 +42,39 @@ class WorkerPool:
                         max_concurrent_transmissions=Stream.MAX_CONCURRENT_TRANSMISSIONS,
                     )
                     await worker.start()
-                    self.clients.append(worker)
-                    logger.info(f"Secondary worker #{i + 1} started successfully.")
+                    
+                    # Verify channel access
+                    try:
+                        await worker.get_chat(Telegram.CHANNEL_ID)
+                        self.clients.append(worker)
+                        logger.info(f"✅ Secondary worker #{i + 1} verified & active in storage channel.")
+                    except Exception as ch_err:
+                        logger.warning(
+                            f"⚠️ Secondary worker #{i + 1} cannot access channel {Telegram.CHANNEL_ID}: {ch_err}. "
+                            "Please add this bot as an ADMIN in your storage channel to enable multi-bot speedup!"
+                        )
+                        # Stop worker if it has no channel access to avoid stream failures
+                        await worker.stop()
                 except Exception as e:
                     logger.error(f"Failed to start secondary worker #{i + 1}: {e}")
         
         self._is_started = True
-        logger.info(f"Worker pool active with {len(self.clients)} total Telegram client(s).")
+        logger.info(f"Worker pool ready with {len(self.clients)} active Telegram client(s).")
 
     async def stop_workers(self):
-        # Stop secondary workers (primary bot is managed separately by app lifespan)
-        for client in self.clients[1:]:
-            try:
-                if client.is_connected:
-                    await client.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping worker client: {e}")
+        for client in self.clients:
+            if client != self.primary_bot:
+                try:
+                    if client.is_connected:
+                        await client.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping worker client: {e}")
         self._is_started = False
 
     async def get_client(self) -> Client:
         if not self.clients:
+            if self.primary_bot:
+                return self.primary_bot
             raise RuntimeError("No Telegram clients available in worker pool.")
         if len(self.clients) == 1:
             return self.clients[0]
