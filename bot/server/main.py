@@ -144,6 +144,7 @@ async def handle_media_transmission(file_id: int, filename: str, is_inline: bool
         start_byte=start,
         end_byte=end,
         content_length=content_length,
+        file_message=file,
         chunk_size=Stream.CHUNK_SIZE,
     )
 

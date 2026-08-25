@@ -2,6 +2,7 @@ import asyncio
 from math import ceil
 from logging import getLogger
 from typing import AsyncGenerator
+from hydrogram.types import Message
 from bot.config import Telegram, Stream
 from .cache import chunk_cache
 from .worker import worker_pool
@@ -11,7 +12,7 @@ logger = getLogger('bot')
 class FastStreamEngine:
     """
     High-Performance MTProto Stream Engine.
-    Uses persistent MTProto streaming pipelines with client-specific file reference resolution,
+    Optimized for blazing-fast single-bot throughput with zero-latency warm session reuse,
     smart RAM chunk caching for instant 0ms probes, and multi-worker failover.
     """
 
@@ -21,10 +22,11 @@ class FastStreamEngine:
         start_byte: int,
         end_byte: int,
         content_length: int,
+        file_message: Message | None = None,
         chunk_size: int = Stream.CHUNK_SIZE,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Streams a byte range [start_byte, end_byte] with fresh per-client file references.
+        Streams a byte range [start_byte, end_byte] with instant warm-session streaming.
         """
         offset_chunks = start_byte // chunk_size
         total_bytes = end_byte - start_byte + 1
@@ -43,7 +45,7 @@ class FastStreamEngine:
                     yield chunk
                 return
 
-        # Prepare client list to try (selected worker, then primary bot as fallback)
+        # Select client from worker pool
         selected_client = await worker_pool.get_client()
         clients_to_try = [selected_client]
         if worker_pool.primary_bot and worker_pool.primary_bot != selected_client:
@@ -54,8 +56,12 @@ class FastStreamEngine:
 
         for client in clients_to_try:
             try:
-                # Fetch fresh message specifically for this client so it gets a valid, authenticated file_reference
-                client_file = await client.get_messages(Telegram.CHANNEL_ID, message_ids=file_id)
+                # Fast path: If using primary bot and message is already provided, reuse it directly (0ms latency)
+                if client == worker_pool.primary_bot and file_message is not None:
+                    client_file = file_message
+                else:
+                    client_file = await client.get_messages(Telegram.CHANNEL_ID, message_ids=file_id)
+                
                 if not client_file or client_file.empty:
                     continue
 
