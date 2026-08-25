@@ -1,4 +1,6 @@
 hydrogram
 quart
 uvicorn
-tgcrypto
+aiofiles
+cryptg
+pycryptodome

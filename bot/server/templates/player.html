@@ -1,154 +1,491 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <title>{{filename}}</title>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>{{ filename }} - Stream</title>
+  
+  <!-- Modern Font & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <!-- Plyr Video Player CSS -->
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
 
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-Frame-Options" content="deny">
+  <style>
+    :root {
+      --bg-primary: #0a0c10;
+      --bg-surface: #12161f;
+      --bg-card: rgba(26, 31, 44, 0.7);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --accent-primary: #3b82f6;
+      --accent-hover: #2563eb;
+      --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --success: #10b981;
+      --vlc: #ff8800;
+      --mx: #8b5cf6;
+      --pot: #eab308;
+      --mpv: #a855f7;
+    }
 
-    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-    <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 16px 40px;
+    }
 
-    <style>
-      html, body {
-        margin: 0;
-        height: 100%;
+    .container {
+      width: 100%;
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Header Bar */
+    .header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      backdrop-filter: blur(10px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      background: var(--accent-gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-badge .dot {
+      width: 6px;
+      height: 6px;
+      background: var(--success);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    /* Player Wrapper */
+    .player-wrapper {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
+      border: 1px solid var(--border-color);
+    }
+
+    .plyr {
+      border-radius: 16px;
+      max-height: 75vh;
+      --plyr-color-main: #3b82f6;
+    }
+
+    .audio-player-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 40px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      text-align: center;
+    }
+
+    .audio-icon-box {
+      width: 80px;
+      height: 80px;
+      border-radius: 20px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: white;
+      box-shadow: 0 10px 25px rgba(59, 130, 246, 0.4);
+    }
+
+    /* Meta Info Card */
+    .meta-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .meta-header {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .file-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      word-break: break-word;
+      line-height: 1.4;
+    }
+
+    .file-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    /* Action Buttons Grid */
+    .actions-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 6px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .btn-primary {
+      background: var(--accent-gradient);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+    }
+
+    .btn-primary:hover {
+      opacity: 0.92;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(59, 130, 246, 0.45);
+    }
+
+    .btn-download {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .btn-download:hover {
+      background: rgba(16, 185, 129, 0.25);
+      transform: translateY(-2px);
+    }
+
+    .btn-vlc {
+      background: rgba(255, 136, 0, 0.15);
+      color: var(--vlc);
+      border: 1px solid rgba(255, 136, 0, 0.3);
+    }
+    .btn-vlc:hover {
+      background: rgba(255, 136, 0, 0.25);
+      transform: translateY(-2px);
+    }
+
+    .btn-mx {
+      background: rgba(139, 92, 246, 0.15);
+      color: var(--mx);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+    .btn-mx:hover {
+      background: rgba(139, 92, 246, 0.25);
+      transform: translateY(-2px);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.08);
+      transform: translateY(-2px);
+    }
+
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--accent-gradient);
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 30px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 999;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .footer a {
+      color: var(--accent-primary);
+      text-decoration: none;
+    }
+
+    @media (max-width: 640px) {
+      .actions-grid {
+        grid-template-columns: 1fr 1fr;
       }
-
-      #stream-media {
-        height: 100%;
-        width: 100%;
+      .btn {
+        padding: 10px 14px;
+        font-size: 0.82rem;
       }
-
-      #error-message {
-        color: red;
-        font-size: 24px;
-        text-align: center;
-        margin-top: 20px;
+      .file-title {
+        font-size: 1.05rem;
       }
+    }
+  </style>
+</head>
+<body>
 
-      .plyr__video-wrapper .plyr-download-button{
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        width: 30px;
-        height: 30px;
-        background-color: rgba(0, 0, 0, 0.7);
-        border-radius: 50%;
-        text-align: center;
-        line-height: 30px;
-        color: white;
-        z-index: 10;
-      }
+  <div class="container">
+    <!-- Header -->
+    <header class="header-bar">
+      <div class="brand">
+        <i class="fa-solid fa-bolt"></i>
+        <span>FileStream</span>
+      </div>
+      <div class="status-badge">
+        <span class="dot"></span>
+        <span>High-Speed Stream</span>
+      </div>
+    </header>
 
-      .plyr__volume {
-        max-width: initial;
-        min-width: initial;
-        width: auto;
-        position: relative;
-      }
+    <!-- Player Area -->
+    <main class="player-wrapper">
+      {% if isAudio %}
+      <div class="audio-player-card">
+        <div class="audio-icon-box">
+          <i class="fa-solid fa-music"></i>
+        </div>
+        <audio id="stream-media" controls preload="auto" style="width: 100%; max-width: 600px;">
+          <source src="{{ mediaLink }}" type="{{ mimeType }}">
+          Your browser does not support audio streaming.
+        </audio>
+      </div>
+      {% else %}
+      <video id="stream-media" controls playsinline preload="auto">
+        <source src="{{ mediaLink }}" type="{{ mimeType }}">
+        <p>Your browser does not support HTML5 video streaming.</p>
+      </video>
+      {% endif %}
+    </main>
 
+    <!-- Meta & Actions Card -->
+    <section class="meta-card">
+      <div class="meta-header">
+        <h1 class="file-title">{{ filename }}</h1>
+        <div class="file-badges">
+          <span class="badge"><i class="fa-solid fa-hard-drive"></i> {{ filesize }}</span>
+          <span class="badge"><i class="fa-solid fa-file-lines"></i> {{ mimeType }}</span>
+          <span class="badge"><i class="fa-solid fa-gauge-high"></i> RFC 7233 Range Ready</span>
+        </div>
+      </div>
 
-      .plyr__video-wrapper .plyr-share-button{
-        position: absolute;
-        top: 50px;
-        left: 10px;
-        width: 30px;
-        height: 30px;
-        background-color: rgba(0, 0, 0, 0.7);
-        border-radius: 50%;
-        text-align: center;
-        line-height: 30px;
-        color: white;
-        z-index: 10;
-      }
+      <!-- Action Buttons Grid -->
+      <div class="actions-grid">
+        <button class="btn btn-primary" onclick="copyStreamLink()">
+          <i class="fa-solid fa-link"></i>
+          <span>Copy Stream URL</span>
+        </button>
 
-      .plyr__video-wrapper .plyr-download-button:hover,
-      .plyr__video-wrapper .plyr-share-button:hover{
-        background-color: rgba(255, 255, 255, 0.7);
-        color: black;
-      }
+        <a href="{{ downloadLink }}" class="btn btn-download" download>
+          <i class="fa-solid fa-circle-down"></i>
+          <span>Fast Download</span>
+        </a>
 
-      .plyr__video-wrapper .plyr-download-button:before {
-        font-family: "Font Awesome 5 Free";
-        content: "\f019";
-        font-weight: bold;
-      }
+        <button class="btn btn-vlc" onclick="openInVLC()">
+          <i class="fa-brands fa-vlc"></i>
+          <span>Open in VLC</span>
+        </button>
 
-      .plyr__video-wrapper .plyr-share-button:before {
-        font-family: "Font Awesome 5 Free";
-        content: "\f064";
-        font-weight: bold;
-      }
+        <button class="btn btn-mx" onclick="openInMXPlayer()">
+          <i class="fa-solid fa-play"></i>
+          <span>Open in MX Player</span>
+        </button>
 
-      .plyr, .plyr__video-wrapper, .plyr__video-embed iframe {
-        height: 100%;
-      }
+        <button class="btn btn-secondary" onclick="openInPotPlayer()">
+          <i class="fa-solid fa-tv"></i>
+          <span>PotPlayer</span>
+        </button>
 
-    </style>
-  </head>
+        <button class="btn btn-secondary" onclick="openInMPV()">
+          <i class="fa-solid fa-film"></i>
+          <span>MPV Player</span>
+        </button>
+      </div>
+    </section>
 
-  <body>
-    <video id="stream-media" controls preload="auto">
-      <source src="" type="">
-      <p class="vjs-no-js">
-        To view this video please enable JavaScript, and consider upgrading to a web browser that supports HTML5 video
-      </p>
-    </video>
+    <!-- Footer -->
+    <footer class="footer">
+      Powered by <strong>FileStream Engine</strong> • Fast MTProto Parallel Streaming
+    </footer>
+  </div>
 
-    <div id="error-message"></div>
+  <!-- Toast Element -->
+  <div id="toast" class="toast">
+    <i class="fa-solid fa-check-circle"></i>
+    <span id="toast-text">Link copied to clipboard!</span>
+  </div>
 
-    <script>
-      var player = new Plyr('#stream-media', {
-          controls:['play-large', 'rewind', 'play', 'fast-forward', 'progress', 'current-time', 'mute', 'settings', 'pip', 'fullscreen'],
-          settings:['speed','loop'],
-          speed:{selected:1,options:[0.25,0.5,0.75,1,1.25,1.5,1.75,2]},
-          seek: 10,
-          keyboard: { focused: true, global: true },
-      });
+  <!-- Plyr Video Player JS -->
+  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+  <script>
+    const mediaLink = "{{ mediaLink }}";
+    const downloadLink = "{{ downloadLink }}";
+    const mimeType = "{{ mimeType }}";
 
-      var mediaLink = "{{ mediaLink }}";
+    // Initialize Plyr Player
+    const player = new Plyr('#stream-media', {
+      controls: [
+        'play-large', 'restart', 'rewind', 'play', 'fast-forward',
+        'progress', 'current-time', 'duration', 'mute', 'volume',
+        'captions', 'settings', 'pip', 'airplay', 'fullscreen'
+      ],
+      settings: ['speed', 'loop'],
+      speed: { selected: 1, options: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
+      seekTime: 10,
+      keyboard: { focused: true, global: true },
+      tooltips: { controls: true, seek: true }
+    });
 
-      if (mediaLink) {
-          document.querySelector('#stream-media source').setAttribute('src', mediaLink);
-          player.restart();
+    // Toast Notification helper
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      const toastText = document.getElementById('toast-text');
+      toastText.textContent = text;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2500);
+    }
 
-          var downloadButton = document.createElement('div');
-          downloadButton.className = 'plyr-download-button';
-
-          downloadButton.onclick = function() {
-            event.stopPropagation();
-            var link = document.createElement('a');
-            link.href = mediaLink;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-          };
-
-          player.elements.container.querySelector('.plyr__video-wrapper').appendChild(downloadButton);
-
-          var shareButton = document.createElement('div');
-          shareButton.className = 'plyr-share-button';
-
-          shareButton.onclick = function() {
-            event.stopPropagation();
-            if (navigator.share) {
-              navigator.share({
-                title: "Play",
-                url: mediaLink
-              });
-            }
-          };
-
-          player.elements.container.querySelector('.plyr__video-wrapper').appendChild(shareButton);
-
+    // Copy Direct Stream URL
+    function copyStreamLink() {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(mediaLink).then(() => {
+          showToast('⚡ Direct Stream URL copied!');
+        });
       } else {
-          document.getElementById('error-message').textContent = 'Error: Media URL not provided';
+        const temp = document.createElement('textarea');
+        temp.value = mediaLink;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+        showToast('⚡ Direct Stream URL copied!');
       }
-    </script>
+    }
 
-  </body>
+    // 1-Click Launchers
+    function openInVLC() {
+      const vlcUrl = 'vlc://' + mediaLink;
+      window.location.href = vlcUrl;
+      showToast('Opening in VLC Media Player...');
+    }
+
+    function openInMXPlayer() {
+      const mxUrl = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end';
+      window.location.href = mxUrl;
+      showToast('Opening in MX Player...');
+    }
+
+    function openInPotPlayer() {
+      const potUrl = 'potplayer://' + mediaLink;
+      window.location.href = potUrl;
+      showToast('Opening in PotPlayer...');
+    }
+
+    function openInMPV() {
+      const mpvUrl = 'mpv://' + mediaLink;
+      window.location.href = mpvUrl;
+      showToast('Opening in MPV Player...');
+    }
+  </script>
+</body>
 </html>

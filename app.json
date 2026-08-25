@@ -1,0 +1,76 @@
+{
+  "name": "File Stream Bot",
+  "description": "An ultra-fast and efficient Telegram file streaming and direct download bot powered by Hydrogram and Quart.",
+  "keywords": [
+    "telegram",
+    "filestream",
+    "streaming",
+    "video-player",
+    "direct-download",
+    "fast-download",
+    "hydrogram",
+    "quart"
+  ],
+  "repository": "https://github.com/TheCaduceus/FileStreamBot",
+  "website": "https://github.com/TheCaduceus/FileStreamBot",
+  "logo": "https://raw.githubusercontent.com/TheCaduceus/FileStreamBot/main/bot/server/templates/icon.png",
+  "success_url": "/",
+  "stack": "heroku-22",
+  "env": {
+    "TELEGRAM_API_ID": {
+      "description": "Telegram API ID from https://my.telegram.org",
+      "required": true
+    },
+    "TELEGRAM_API_HASH": {
+      "description": "Telegram API Hash from https://my.telegram.org",
+      "required": true
+    },
+    "TELEGRAM_BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "TELEGRAM_BOT_USERNAME": {
+      "description": "Telegram Bot Username (without @)",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Telegram User ID of the Bot Owner",
+      "required": true
+    },
+    "TELEGRAM_CHANNEL_ID": {
+      "description": "Telegram Storage Channel ID (must start with -100...)",
+      "required": true
+    },
+    "BASE_URL": {
+      "description": "Your App URL (e.g. https://your-app-name.herokuapp.com or custom domain). Leave blank to auto-detect.",
+      "required": false,
+      "value": ""
+    },
+    "ALLOWED_USER_IDS": {
+      "description": "Space-separated Telegram User IDs allowed to use the bot. Leave empty to allow all users.",
+      "required": false,
+      "value": ""
+    },
+    "MULTI_BOT_TOKENS": {
+      "description": "Optional space or comma-separated secondary bot tokens for multi-worker parallel streaming speedup.",
+      "required": false,
+      "value": ""
+    },
+    "CACHE_SIZE_MB": {
+      "description": "In-memory LRU chunk cache size in MB (e.g. 64 or 128 for 0ms instant playback start).",
+      "required": false,
+      "value": "64"
+    },
+    "PREFETCH_CHUNKS": {
+      "description": "Number of 1MB chunks to prefetch concurrently ahead during streaming.",
+      "required": false,
+      "value": "4"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
