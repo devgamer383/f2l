@@ -71,8 +71,11 @@ async def handle_user_file(_, msg: Message):
     )
 
     if can_stream:
-        caption += f"• **Fast Stream:** [Click Here]({stream_link})\n"
-        caption += f"• **Web Player:** [Click Here]({player_link})\n"
+        caption += (
+            f"• **Fast Stream:** [Click Here]({stream_link})\n"
+            f"• **Web Player:** [Click Here]({player_link})\n\n"
+            f"💡 _Tip: Open the Web Player for 1-Click VLC & MX Player links!_"
+        )
 
         buttons = [
             [
@@ -81,10 +84,6 @@ async def handle_user_file(_, msg: Message):
             ],
             [
                 InlineKeyboardButton("🎬 Open Web Player", url=player_link)
-            ],
-            [
-                InlineKeyboardButton("🟠 Open in VLC", url=f"vlc://{stream_link}"),
-                InlineKeyboardButton("🟣 MX Player", url=f"intent:{stream_link}#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end")
             ]
         ]
     else:

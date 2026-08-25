@@ -40,6 +40,12 @@ class Stream:
 
 class Server:
     BASE_URL = _get_env_str("BASE_URL", "").rstrip("/")
+    # Auto-detect Heroku domain if BASE_URL was not set explicitly
+    if not BASE_URL:
+        _heroku_app = env.get("HEROKU_APP_NAME") or env.get("HEROKU_APP_DEFAULT_DOMAIN_NAME")
+        if _heroku_app:
+            BASE_URL = f"https://{_heroku_app}.herokuapp.com" if not _heroku_app.startswith("http") else _heroku_app.rstrip("/")
+    
     BIND_ADDRESS = _get_env_str("BIND_ADDRESS", "0.0.0.0")
     # Heroku automatically injects $PORT
     PORT = _get_env_int("PORT", 8080)
