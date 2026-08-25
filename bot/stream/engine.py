@@ -2,8 +2,7 @@ import asyncio
 from math import ceil
 from logging import getLogger
 from typing import AsyncGenerator
-from hydrogram.types import Message
-from bot.config import Stream
+from bot.config import Telegram, Stream
 from .cache import chunk_cache
 from .worker import worker_pool
 
@@ -12,27 +11,27 @@ logger = getLogger('bot')
 class FastStreamEngine:
     """
     High-Performance MTProto Stream Engine.
-    Uses continuous persistent MTProto streaming pipelines, smart RAM chunk caching
-    for instant 0ms media header probes, and multi-worker client round-robin with automatic fallback.
+    Uses persistent MTProto streaming pipelines with client-specific file reference resolution,
+    smart RAM chunk caching for instant 0ms probes, and multi-worker failover.
     """
 
     async def stream_file_range(
         self,
-        file_message: Message,
+        file_id: int,
         start_byte: int,
         end_byte: int,
         content_length: int,
         chunk_size: int = Stream.CHUNK_SIZE,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Streams a byte range [start_byte, end_byte] with 0ms cache hits and continuous MTProto streaming.
+        Streams a byte range [start_byte, end_byte] with fresh per-client file references.
         """
         offset_chunks = start_byte // chunk_size
         total_bytes = end_byte - start_byte + 1
         chunks_to_stream = ceil(total_bytes / chunk_size)
         
         # Check cache if single chunk request (e.g. video player metadata probe)
-        cache_key = f"{file_message.id}_{offset_chunks}"
+        cache_key = f"{file_id}_{offset_chunks}"
         if chunks_to_stream == 1:
             cached = await chunk_cache.get(cache_key)
             if cached is not None:
@@ -55,10 +54,16 @@ class FastStreamEngine:
 
         for client in clients_to_try:
             try:
+                # Fetch fresh message specifically for this client so it gets a valid, authenticated file_reference
+                client_file = await client.get_messages(Telegram.CHANNEL_ID, message_ids=file_id)
+                if not client_file or client_file.empty:
+                    continue
+
                 bytes_streamed = 0
                 chunk_index = 0
+
                 async for chunk in client.stream_media(
-                    file_message,
+                    client_file,
                     offset=offset_chunks,
                     limit=chunks_to_stream,
                 ):
@@ -68,7 +73,7 @@ class FastStreamEngine:
                     # Cache initial metadata chunks and single chunks in memory
                     current_chunk_pos = offset_chunks + chunk_index
                     if current_chunk_pos == 0 or chunks_to_stream == 1:
-                        await chunk_cache.set(f"{file_message.id}_{current_chunk_pos}", chunk)
+                        await chunk_cache.set(f"{file_id}_{current_chunk_pos}", chunk)
 
                     # Trim first chunk if starting in the middle
                     if chunk_index == 0:
@@ -91,7 +96,7 @@ class FastStreamEngine:
                     bytes_streamed += len(chunk)
                     chunk_index += 1
                 
-                # If streaming completed or was started successfully, break
+                # If streaming completed or was started successfully, finish
                 if bytes_streamed > 0 or chunks_to_stream == 0:
                     break
 
@@ -99,9 +104,9 @@ class FastStreamEngine:
                 # Client disconnected or seeked
                 break
             except Exception as e:
-                logger.warning(f"Worker client {client.name} stream error on msg {file_message.id}: {e}. Retrying fallback...")
+                logger.warning(f"Client {client.name} stream error on msg {file_id}: {e}. Retrying fallback...")
                 if client == clients_to_try[-1]:
-                    logger.error(f"All clients failed for msg {file_message.id}: {e}")
+                    logger.error(f"All clients failed for msg {file_id}: {e}")
                     raise
 
 fast_streamer = FastStreamEngine()

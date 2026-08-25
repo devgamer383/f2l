@@ -140,7 +140,7 @@ async def handle_media_transmission(file_id: int, filename: str, is_inline: bool
         headers['Content-Length'] = str(file_size)
 
     stream_generator = fast_streamer.stream_file_range(
-        file_message=file,
+        file_id=file_id,
         start_byte=start,
         end_byte=end,
         content_length=content_length,
