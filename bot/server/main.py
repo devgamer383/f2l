@@ -143,8 +143,8 @@ async def handle_media_transmission(file_id: int, filename: str, is_inline: bool
         file_message=file,
         start_byte=start,
         end_byte=end,
+        content_length=content_length,
         chunk_size=Stream.CHUNK_SIZE,
-        prefetch_count=Stream.PREFETCH_CHUNKS,
     )
 
     return Response(stream_generator, headers=headers, status=status_code)

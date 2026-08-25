@@ -1,4 +1,5 @@
 import asyncio
+from math import ceil
 from logging import getLogger
 from typing import AsyncGenerator
 from hydrogram.types import Message
@@ -10,120 +11,79 @@ logger = getLogger('bot')
 
 class FastStreamEngine:
     """
-    High-Performance MTProto Parallel Prefetch Streamer.
-    Uses asynchronous worker pooling and prefetch buffering to achieve
-    maximum throughput, zero stuttering, and instant seek response times.
+    High-Performance MTProto Stream Engine.
+    Uses continuous persistent MTProto streaming pipelines, smart RAM chunk caching
+    for instant 0ms media header probes, and multi-worker client round-robin.
     """
-
-    async def _fetch_chunk(self, file_message: Message, chunk_idx: int) -> bytes:
-        cache_key = f"{file_message.id}_{chunk_idx}"
-        
-        # Check LRU in-memory cache first (0ms latency)
-        cached_data = await chunk_cache.get(cache_key)
-        if cached_data is not None:
-            return cached_data
-
-        client = await worker_pool.get_client()
-        chunk_data = bytearray()
-
-        try:
-            async for chunk in client.stream_media(file_message, offset=chunk_idx, limit=1):
-                if chunk:
-                    chunk_data.extend(chunk)
-        except Exception as e:
-            logger.error(f"Error fetching chunk #{chunk_idx} for msg {file_message.id}: {e}")
-            raise
-
-        data_bytes = bytes(chunk_data)
-        
-        # Cache chunk (especially headers and hot chunks)
-        if data_bytes:
-            await chunk_cache.set(cache_key, data_bytes)
-
-        return data_bytes
 
     async def stream_file_range(
         self,
         file_message: Message,
         start_byte: int,
         end_byte: int,
+        content_length: int,
         chunk_size: int = Stream.CHUNK_SIZE,
-        prefetch_count: int = Stream.PREFETCH_CHUNKS,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Streams a byte range [start_byte, end_byte] with concurrent chunk prefetching.
+        Streams a byte range [start_byte, end_byte] with 0ms cache hits and continuous MTProto streaming.
         """
-        start_chunk = start_byte // chunk_size
-        end_chunk = end_byte // chunk_size
-        total_bytes_to_send = end_byte - start_byte + 1
-
-        active_tasks: dict[int, asyncio.Task[bytes]] = {}
-        pending_chunks = list(range(start_chunk, end_chunk + 1))
+        offset_chunks = start_byte // chunk_size
+        total_bytes = end_byte - start_byte + 1
+        chunks_to_stream = ceil(total_bytes / chunk_size)
         
-        # Semaphore to limit concurrent background downloads
-        semaphore = asyncio.Semaphore(prefetch_count)
+        # Check cache if single chunk request (e.g. video player metadata probe)
+        cache_key = f"{file_message.id}_{offset_chunks}"
+        if chunks_to_stream == 1:
+            cached = await chunk_cache.get(cache_key)
+            if cached is not None:
+                trim_start = start_byte % chunk_size
+                chunk = cached[trim_start:]
+                if len(chunk) > content_length:
+                    chunk = chunk[:content_length]
+                if chunk:
+                    yield chunk
+                return
 
-        async def _download_worker(c_idx: int) -> bytes:
-            async with semaphore:
-                return await self._fetch_chunk(file_message, c_idx)
-
-        # Pre-seed initial tasks
-        for _ in range(min(prefetch_count, len(pending_chunks))):
-            next_idx = pending_chunks.pop(0)
-            active_tasks[next_idx] = asyncio.create_task(_download_worker(next_idx))
-
+        client = await worker_pool.get_client()
         bytes_streamed = 0
+        chunk_index = 0
 
         try:
-            for current_chunk_idx in range(start_chunk, end_chunk + 1):
-                if bytes_streamed >= total_bytes_to_send:
+            async for chunk in client.stream_media(
+                file_message,
+                offset=offset_chunks,
+                limit=chunks_to_stream,
+            ):
+                if not chunk:
                     break
 
-                # Spawn next task to maintain continuous pipeline buffer
-                if pending_chunks:
-                    next_idx = pending_chunks.pop(0)
-                    active_tasks[next_idx] = asyncio.create_task(_download_worker(next_idx))
+                # Cache initial metadata chunks and single chunks in memory
+                current_chunk_pos = offset_chunks + chunk_index
+                if current_chunk_pos == 0 or chunks_to_stream == 1:
+                    await chunk_cache.set(f"{file_message.id}_{current_chunk_pos}", chunk)
 
-                task = active_tasks.pop(current_chunk_idx, None)
-                if task is None:
-                    task = asyncio.create_task(_download_worker(current_chunk_idx))
+                # Trim first chunk if starting in the middle
+                if chunk_index == 0:
+                    trim_start = start_byte % chunk_size
+                    if trim_start > 0:
+                        chunk = chunk[trim_start:]
 
-                try:
-                    chunk_data = await task
-                except asyncio.CancelledError:
+                remaining_bytes = content_length - bytes_streamed
+                if remaining_bytes <= 0:
                     break
-                except Exception as e:
-                    logger.error(f"Error awaiting chunk {current_chunk_idx}: {e}")
-                    raise
-
-                if not chunk_data:
-                    break
-
-                # Trim first chunk if starting in the middle of a chunk
-                if current_chunk_idx == start_chunk:
-                    trim_offset = start_byte % chunk_size
-                    if trim_offset > 0:
-                        chunk_data = chunk_data[trim_offset:]
 
                 # Trim last chunk if ending in the middle
-                remaining_bytes = total_bytes_to_send - bytes_streamed
-                if len(chunk_data) > remaining_bytes:
-                    chunk_data = chunk_data[:remaining_bytes]
+                if len(chunk) > remaining_bytes:
+                    chunk = chunk[:remaining_bytes]
 
-                if not chunk_data:
+                if not chunk:
                     break
 
-                yield chunk_data
-                bytes_streamed += len(chunk_data)
-
-        finally:
-            # Clean up all in-flight prefetch tasks immediately on disconnect/completion
-            for t in active_tasks.values():
-                if not t.done():
-                    t.cancel()
-            
-            # Allow cancelled tasks to clean up quietly
-            if active_tasks:
-                await asyncio.gather(*active_tasks.values(), return_exceptions=True)
+                yield chunk
+                bytes_streamed += len(chunk)
+                chunk_index += 1
+        except Exception as e:
+            logger.error(f"Error streaming msg {file_message.id}: {e}")
+            raise
 
 fast_streamer = FastStreamEngine()
