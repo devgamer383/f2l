@@ -66,18 +66,21 @@ class VirtualStreamEngine:
         if not isinstance(messages, list):
             messages = [messages]
 
+        msg_dict = {m.id: m for m in messages if m and not m.empty}
+
         parts: List[Dict[str, Any]] = []
         total_size = 0
         unified_name = ""
         mime_type = "video/x-matroska"
 
-        for idx, m in enumerate(messages):
-            if not m or m.empty:
-                raise FileNotFoundError(f"Message ID {msg_ids[idx]} not found in storage channel")
+        for idx, mid in enumerate(msg_ids):
+            m = msg_dict.get(mid)
+            if not m:
+                raise FileNotFoundError(f"Message ID {mid} not found in storage channel")
             
             p_name, p_size, p_mime = get_file_properties(m)
             if p_size <= 0:
-                raise ValueError(f"Message ID {msg_ids[idx]} has no valid media file")
+                raise ValueError(f"Message ID {mid} has no valid media file")
 
             if idx == 0:
                 unified_name = clean_virtual_name(p_name)
