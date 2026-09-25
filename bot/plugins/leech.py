@@ -15,6 +15,7 @@ from bot.config import Telegram, Server
 from bot.modules.decorators import verify_user
 from bot.modules.telegram import format_bytes, render_progress
 from bot.stream.virtual import encode_batch, clean_virtual_name
+from bot.stream.uploader import fast_upload
 
 # 1.95 GB slice size to stay safely within Telegram's 2,000 MB limit
 PART_SIZE = 1950 * 1024 * 1024
@@ -137,12 +138,12 @@ async def leech_command(client, msg: Message):
                             except Exception:
                                 pass
 
+                    uploaded_file = await fast_upload(client, local_path, progress=upload_progress)
                     sent = await client.send_document(
                         chat_id=Telegram.CHANNEL_ID,
-                        document=local_path,
+                        document=uploaded_file,
                         file_name=filename,
-                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`",
-                        progress=upload_progress
+                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`"
                     )
 
                     if os.path.exists(local_path):
@@ -245,12 +246,12 @@ async def leech_command(client, msg: Message):
                             except Exception:
                                 pass
 
+                    uploaded_slice = await fast_upload(client, part_path, progress=part_upload_progress)
                     sent_part = await client.send_document(
                         chat_id=Telegram.CHANNEL_ID,
-                        document=part_path,
+                        document=uploaded_slice,
                         file_name=part_filename,
-                        caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`",
-                        progress=part_upload_progress
+                        caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`"
                     )
 
                     msg_ids.append(sent_part.id)
