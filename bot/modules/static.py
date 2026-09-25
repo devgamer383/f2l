@@ -5,12 +5,14 @@ I am an **Ultra-Fast Stream & Direct Download Link Generator**. Send me any vide
 
 ✨ **Key Features:**
 • 🚀 **Parallel MTProto Chunk Acceleration**
-• 🎬 **Embedded Web Player (Plyr)**
+• 🎬 **Embedded Web Player (Plyr) with Multi-Audio Switcher**
+• 🧩 **10GB+ Virtual Stream Stitcher (/merge)**
 • 📱 **1-Click VLC / MX Player / MPV Deep Links**
 • ⚡ **RFC 7233 Range-Seeking (0ms metadata response)**
 • 🌐 **Compatible with IDM, Chrome, Safari, Android, Smart TVs**
 
 **Commands:**
+/merge <count> - Merge split 2GB parts into 1 continuous 10GB+ stream
 /status - View live server streaming & cache statistics
 /privacy - View privacy policy
 /help - Show this help guide

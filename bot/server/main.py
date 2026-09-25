@@ -4,7 +4,7 @@ from quart import Blueprint, Response, request, render_template, redirect, jsoni
 from .error import abort
 from bot.config import Telegram, Server, Stream
 from bot.modules.telegram import get_message, get_file_properties, format_bytes, is_streamable_media
-from bot.stream import fast_streamer, chunk_cache
+from bot.stream import fast_streamer, chunk_cache, virtual_streamer, virtual_db
 
 bp = Blueprint('main', __name__)
 
@@ -197,3 +197,161 @@ async def web_player(file_id: int, filename: str):
         ext=ext.upper().lstrip('.'),
         version=Server.VERSION
     )
+
+# -------------------------------------------------------------
+# Virtual Multi-Part 10GB+ Streaming Routes
+# -------------------------------------------------------------
+
+async def handle_virtual_transmission(batch_id: str, filename: str, is_inline: bool):
+    """
+    RFC 7233 Range-aware transmitter for virtual stitched 10GB+ files across multiple 2GB parts.
+    """
+    batch = await virtual_db.get_batch(batch_id)
+    if not batch:
+        abort(404, 'Virtual file batch not found')
+
+    file_size = batch['total_size']
+    mime_type = batch['mime_type']
+    if not filename:
+        filename = batch['filename']
+
+    disposition = "inline" if is_inline else "attachment"
+
+    if request.method == 'HEAD':
+        headers = {
+            'Content-Type': mime_type,
+            'Content-Length': str(file_size),
+            'Accept-Ranges': 'bytes',
+            'Content-Disposition': f'{disposition}; filename="{filename}"',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges',
+        }
+        return Response('', headers=headers, status=200)
+
+    range_header = request.headers.get('Range')
+    start = 0
+    end = file_size - 1 if file_size > 0 else 0
+    status_code = 200
+
+    if range_header:
+        range_match = re.match(r'bytes=(\d*)-(\d*)', range_header.strip())
+        if range_match:
+            start_str, end_str = range_match.groups()
+            if start_str and end_str:
+                start = int(start_str)
+                end = int(end_str)
+            elif start_str:
+                start = int(start_str)
+                end = file_size - 1
+            elif end_str:
+                suffix_len = int(end_str)
+                start = max(0, file_size - suffix_len)
+                end = file_size - 1
+
+            if start > end or start >= file_size:
+                abort(416, 'Requested range not satisfiable')
+
+            status_code = 206
+        else:
+            abort(400, 'Invalid Range header format')
+
+    content_length = (end - start + 1) if file_size > 0 else 0
+
+    headers = {
+        'Content-Type': mime_type,
+        'Content-Disposition': f'{disposition}; filename="{filename}"',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges',
+    }
+
+    if status_code == 206:
+        headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+        headers['Content-Length'] = str(content_length)
+    else:
+        headers['Content-Length'] = str(file_size)
+
+    stream_generator = virtual_streamer.stream_virtual_range(
+        batch_id=batch_id,
+        start_byte=start,
+        end_byte=end,
+        content_length=content_length,
+        chunk_size=Stream.CHUNK_SIZE,
+    )
+
+    return Response(stream_generator, headers=headers, status=status_code)
+
+@bp.route('/dl/v/<batch_id>/<path:filename>', methods=['GET', 'HEAD'])
+async def download_virtual_file(batch_id: str, filename: str):
+    """Direct Download endpoint for 10GB+ virtual files (Content-Disposition: attachment)."""
+    return await handle_virtual_transmission(batch_id, filename, is_inline=False)
+
+@bp.route('/inline/v/<batch_id>/<path:filename>', methods=['GET', 'HEAD'])
+@bp.route('/play/v/<batch_id>/<path:filename>', methods=['GET', 'HEAD'])
+async def inline_stream_virtual_file(batch_id: str, filename: str):
+    """Direct Streaming endpoint for 10GB+ virtual files (Content-Disposition: inline)."""
+    return await handle_virtual_transmission(batch_id, filename, is_inline=True)
+
+@bp.route('/v/<batch_id>/<path:filename>')
+@bp.route('/stream/v/<batch_id>/<path:filename>')
+async def web_player_virtual(batch_id: str, filename: str):
+    """Universal Web Player page for 10GB+ stitched virtual video."""
+    batch = await virtual_db.get_batch(batch_id)
+    if not batch:
+        abort(404, 'Virtual file batch not found')
+
+    total_size = batch['total_size']
+    mime_type = batch['mime_type']
+    clean_filename = filename if filename else batch['filename']
+
+    base = get_base_url()
+    media_link = f'{base}/inline/v/{batch_id}/{clean_filename}'
+    download_link = f'{base}/dl/v/{batch_id}/{clean_filename}'
+
+    import os
+    ext = os.path.splitext(clean_filename)[1].lower()
+    is_audio = mime_type.startswith('audio/')
+    is_mkv = ext in ['.mkv', '.avi', '.flv', '.wmv', '.mov', '.ts'] or 'matroska' in mime_type
+
+    return await render_template(
+        'player.html',
+        filename=clean_filename,
+        filesize=format_bytes(total_size),
+        mimeType=mime_type,
+        mediaLink=media_link,
+        downloadLink=download_link,
+        isAudio=is_audio,
+        isMkv=is_mkv,
+        ext=ext.upper().lstrip('.'),
+        version=Server.VERSION
+    )
+
+@bp.route('/info/v/<batch_id>')
+async def virtual_file_info(batch_id: str):
+    """Virtual file metadata JSON API."""
+    batch = await virtual_db.get_batch(batch_id)
+    if not batch:
+        abort(404, 'Virtual file batch not found')
+
+    base = get_base_url()
+    filename = batch['filename']
+    total_size = batch['total_size']
+
+    return jsonify({
+        "batch_id": batch_id,
+        "filename": filename,
+        "total_size_bytes": total_size,
+        "size_formatted": format_bytes(total_size),
+        "mime_type": batch['mime_type'],
+        "parts_count": len(batch['parts']),
+        "stream_url": f"{base}/inline/v/{batch_id}/{filename}",
+        "download_url": f"{base}/dl/v/{batch_id}/{filename}",
+        "web_player_url": f"{base}/v/{batch_id}/{filename}"
+    })
+
