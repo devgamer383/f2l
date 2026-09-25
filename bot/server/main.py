@@ -18,7 +18,7 @@ def get_base_url() -> str:
 async def home():
     if Telegram.BOT_USERNAME:
         return redirect(f'https://t.me/{Telegram.BOT_USERNAME}')
-    return jsonify({"status": "running", "service": "FileStreamBot", "version": "2.0"})
+    return jsonify({"status": "running", "service": "FileStreamBot", "version": Server.VERSION})
 
 @bp.route('/health')
 @bp.route('/ping')
@@ -26,6 +26,7 @@ async def health_check():
     """Heroku Keep-Alive / Health Check endpoint."""
     return jsonify({
         "status": "healthy",
+        "version": Server.VERSION,
         "cache": chunk_cache.get_stats()
     }), 200
 
@@ -193,5 +194,6 @@ async def web_player(file_id: int, filename: str):
         downloadLink=download_link,
         isAudio=is_audio,
         isMkv=is_mkv,
-        ext=ext.upper().lstrip('.')
+        ext=ext.upper().lstrip('.'),
+        version=Server.VERSION
     )

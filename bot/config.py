@@ -50,6 +50,7 @@ class Server:
     # Heroku automatically injects $PORT
     PORT = _get_env_int("PORT", 8080)
     KEEP_ALIVE = 60
+    VERSION = _get_env_str("VERSION", "2.1")
 
 # LOGGING CONFIGURATION
 LOGGER_CONFIG_JSON = {
