@@ -3,3 +3,4 @@ quart
 uvicorn
 aiofiles
 TgCrypto
+aiohttp
