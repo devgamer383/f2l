@@ -12,11 +12,13 @@ from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot import TelegramBot
 from bot.config import Telegram, Server
+from logging import getLogger
 from bot.modules.decorators import verify_user
 from bot.modules.telegram import format_bytes, render_progress, make_progress_bar, format_eta
 from bot.stream.virtual import encode_batch, clean_virtual_name
-from bot.stream.uploader import fast_upload
 from bot.stream.worker import worker_pool
+
+logger = getLogger('bot')
 
 # 1.95 GB slice size to stay safely within Telegram's 2,000 MB limit
 PART_SIZE = 1950 * 1024 * 1024
@@ -152,12 +154,12 @@ async def leech_command(client, msg: Message):
                             except Exception:
                                 pass
 
-                    uploaded_file = await fast_upload(client, local_path, progress=upload_progress)
                     sent = await client.send_document(
                         chat_id=Telegram.CHANNEL_ID,
-                        document=uploaded_file,
+                        document=local_path,
                         file_name=filename,
-                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`"
+                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`",
+                        progress=upload_progress
                     )
 
                     if os.path.exists(local_path):
@@ -241,13 +243,24 @@ async def leech_command(client, msg: Message):
                         async def p_cb(curr, tot):
                             await update_aggregate_progress(part_idx, curr)
 
-                        uploaded_doc = await fast_upload(bot_worker, p_path, progress=p_cb)
-                        sent_slice = await bot_worker.send_document(
-                            chat_id=Telegram.CHANNEL_ID,
-                            document=uploaded_doc,
-                            file_name=p_name,
-                            caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`"
-                        )
+                        try:
+                            sent_slice = await bot_worker.send_document(
+                                chat_id=Telegram.CHANNEL_ID,
+                                document=p_path,
+                                file_name=p_name,
+                                caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`",
+                                progress=p_cb
+                            )
+                        except Exception as e:
+                            logger.warning(f"Worker bot failed to send document ({e}), falling back to primary bot...")
+                            sent_slice = await client.send_document(
+                                chat_id=Telegram.CHANNEL_ID,
+                                document=p_path,
+                                file_name=p_name,
+                                caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`",
+                                progress=p_cb
+                            )
+
                         msg_ids[part_idx] = sent_slice.id
                         part_progress[part_idx] = p_len
                         await update_aggregate_progress(part_idx, p_len)
