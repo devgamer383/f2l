@@ -4,7 +4,7 @@ from quart import Blueprint, Response, request, render_template, redirect, jsoni
 from .error import abort
 from bot.config import Telegram, Server, Stream
 from bot.modules.telegram import get_message, get_file_properties, format_bytes, is_streamable_media
-from bot.stream import fast_streamer, chunk_cache, virtual_streamer, virtual_db
+from bot.stream import fast_streamer, chunk_cache, virtual_streamer
 
 bp = Blueprint('main', __name__)
 
@@ -205,10 +205,12 @@ async def web_player(file_id: int, filename: str):
 async def handle_virtual_transmission(batch_id: str, filename: str, is_inline: bool):
     """
     RFC 7233 Range-aware transmitter for virtual stitched 10GB+ files across multiple 2GB parts.
+    Stateless: Resolves metadata on the fly directly from the URL token.
     """
-    batch = await virtual_db.get_batch(batch_id)
-    if not batch:
-        abort(404, 'Virtual file batch not found')
+    try:
+        batch = await virtual_streamer.get_virtual_metadata(batch_id)
+    except Exception as e:
+        abort(404, f'Virtual file batch not found: {e}')
 
     file_size = batch['total_size']
     mime_type = batch['mime_type']
@@ -302,8 +304,9 @@ async def inline_stream_virtual_file(batch_id: str, filename: str):
 @bp.route('/stream/v/<batch_id>/<path:filename>')
 async def web_player_virtual(batch_id: str, filename: str):
     """Universal Web Player page for 10GB+ stitched virtual video."""
-    batch = await virtual_db.get_batch(batch_id)
-    if not batch:
+    try:
+        batch = await virtual_streamer.get_virtual_metadata(batch_id)
+    except Exception:
         abort(404, 'Virtual file batch not found')
 
     total_size = batch['total_size']
@@ -335,8 +338,9 @@ async def web_player_virtual(batch_id: str, filename: str):
 @bp.route('/info/v/<batch_id>')
 async def virtual_file_info(batch_id: str):
     """Virtual file metadata JSON API."""
-    batch = await virtual_db.get_batch(batch_id)
-    if not batch:
+    try:
+        batch = await virtual_streamer.get_virtual_metadata(batch_id)
+    except Exception:
         abort(404, 'Virtual file batch not found')
 
     base = get_base_url()

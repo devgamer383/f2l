@@ -1,5 +1,3 @@
-import re
-import secrets
 from hydrogram import filters
 from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -7,20 +5,14 @@ from bot import TelegramBot
 from bot.config import Telegram, Server
 from bot.modules.decorators import verify_user
 from bot.modules.telegram import format_bytes, get_file_properties
-from bot.stream import virtual_db
-
-def clean_virtual_name(raw_name: str) -> str:
-    """Strips .001, .part1, etc. to produce a clean merged media filename."""
-    # Match patterns like .001, .002 or .part01, .part1
-    cleaned = re.sub(r'(\.00[1-9]|\.0[1-9][0-9]|\.part0*[1-9]|\.z0[1-9])+$', '', raw_name, flags=re.IGNORECASE)
-    cleaned = re.sub(r'[\\/*?:"<>|]', '_', cleaned).replace(" ", "-")
-    return cleaned if cleaned else raw_name
+from bot.stream.virtual import encode_batch, clean_virtual_name
 
 @TelegramBot.on_message(filters.command(['merge', 'stitch', 'join']) & filters.private)
 @verify_user
 async def merge_command(client, msg: Message):
     """
     Merges multiple 2GB Telegram parts into a single virtual 10GB+ stream link.
+    100% Stateless: No database required. Links are permanent and survive all restarts.
     Usage:
       1. Reply to the first file message with: /merge <count> (e.g. /merge 5)
       2. Or send: /merge <start_msg_id> <count>
@@ -43,7 +35,6 @@ async def merge_command(client, msg: Message):
             await msg.reply_text("❌ Count must be a valid number (e.g. `/merge 5`).", quote=True)
             return
         
-        # When replying, copy the replied file to storage if not already there
         replied = msg.reply_to_message
         if not (replied.document or replied.video or replied.audio):
             await msg.reply_text("❌ The replied message does not contain a media file.", quote=True)
@@ -55,7 +46,7 @@ async def merge_command(client, msg: Message):
     else:
         if len(args) < 2:
             await msg.reply_text(
-                "ℹ️ **Virtual 10GB+ Multi-Part Stream Stitcher**\n\n"
+                "ℹ️ **Stateless 10GB+ Multi-Part Stream Stitcher**\n\n"
                 "**How to merge split 2GB parts into 1 single link:**\n"
                 "1. Forward part 1 to the bot\n"
                 "2. Reply to it with: `/merge <total_parts>` (e.g. `/merge 5`)\n\n"
@@ -76,64 +67,55 @@ async def merge_command(client, msg: Message):
 
     status_msg = await msg.reply_text(f"⏳ Scanning and stitching {count} parts...", quote=True)
 
-    parts = []
-    total_size = 0
-    unified_name = ""
-    mime_type = "video/x-matroska"
+    msg_ids = list(range(start_id, start_id + count))
 
-    # Fetch parts from storage channel sequentially
-    for offset in range(count):
-        curr_id = start_id + offset
-        try:
-            part_msg = await client.get_messages(Telegram.CHANNEL_ID, message_ids=curr_id)
-            if not part_msg or part_msg.empty:
-                await status_msg.edit(f"❌ Part {offset + 1} (Msg ID {curr_id}) not found in storage channel.")
+    try:
+        # Fetch all messages in a single call to verify parts & sizes
+        messages = await client.get_messages(Telegram.CHANNEL_ID, message_ids=msg_ids)
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        total_size = 0
+        unified_name = ""
+
+        for idx, m in enumerate(messages):
+            if not m or m.empty:
+                await status_msg.edit(f"❌ Part {idx + 1} (Msg ID {msg_ids[idx]}) not found in storage channel.")
                 return
 
-            p_name, p_size, p_mime = get_file_properties(part_msg)
+            p_name, p_size, _ = get_file_properties(m)
             if p_size <= 0:
-                await status_msg.edit(f"❌ Part {offset + 1} (Msg ID {curr_id}) is not a valid file.")
+                await status_msg.edit(f"❌ Part {idx + 1} (Msg ID {msg_ids[idx]}) is not a valid file.")
                 return
 
-            if offset == 0:
+            if idx == 0:
                 unified_name = clean_virtual_name(p_name)
-                mime_type = p_mime
 
-            parts.append({
-                "message_id": curr_id,
-                "size": p_size,
-                "name": p_name
-            })
             total_size += p_size
-        except Exception as e:
-            await status_msg.edit(f"❌ Error reading part {offset + 1}: {e}")
-            return
 
-    batch_id = secrets.token_hex(6)
-    await virtual_db.save_batch(
-        batch_id=batch_id,
-        filename=unified_name,
-        total_size=total_size,
-        mime_type=mime_type,
-        parts=parts
-    )
+    except Exception as e:
+        await status_msg.edit(f"❌ Error verifying parts: {e}")
+        return
+
+    # Encode message sequence into URL token (stateless: no database required!)
+    batch_token = encode_batch(msg_ids)
 
     base_url = Server.BASE_URL.rstrip('/') if Server.BASE_URL else f"http://127.0.0.1:{Server.PORT}"
-    stream_url = f"{base_url}/inline/v/{batch_id}/{unified_name}"
-    download_url = f"{base_url}/dl/v/{batch_id}/{unified_name}"
-    player_url = f"{base_url}/v/{batch_id}/{unified_name}"
+    stream_url = f"{base_url}/inline/v/{batch_token}/{unified_name}"
+    download_url = f"{base_url}/dl/v/{batch_token}/{unified_name}"
+    player_url = f"{base_url}/v/{batch_token}/{unified_name}"
 
     formatted_size = format_bytes(total_size)
     text = (
         f"🎬 **Virtual Multi-Part Stream Created!**\n\n"
         f"📁 **Merged Name:** `{unified_name}`\n"
         f"📦 **Total Size:** `{formatted_size}` ({count} Parts)\n"
-        f"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching`\n\n"
+        f"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching (Stateless)`\n\n"
         f"🔗 **Single Seamless Links:**\n"
         f"• **Direct Stream:** [Click Here]({stream_url})\n"
         f"• **Web & VLC Player:** [Click Here]({player_url})\n"
         f"• **Single 10GB Download:** [Click Here]({download_url})\n\n"
-        f"💡 _All {count} parts will stream and seek seamlessly as one continuous 10GB+ file!_"
+        f"💡 _All {count} parts stream and seek seamlessly as one continuous 10GB+ file without any database!_"
     )
 
     buttons = [
