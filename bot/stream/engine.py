@@ -11,9 +11,9 @@ logger = getLogger('bot')
 
 class FastStreamEngine:
     """
-    High-Performance MTProto Stream Engine.
-    Optimized for blazing-fast single-bot throughput with zero-latency warm session reuse,
-    smart RAM chunk caching for instant 0ms probes, and multi-worker failover.
+    High-Performance MTProto Stream Engine with True Sliding-Window Prefetching.
+    Downloads chunks ahead in an asynchronous producer-consumer queue to eliminate
+    stop-and-wait latency, with 0ms probe caching and instant seek cancellation.
     """
 
     async def stream_file_range(
@@ -26,13 +26,13 @@ class FastStreamEngine:
         chunk_size: int = Stream.CHUNK_SIZE,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Streams a byte range [start_byte, end_byte] with instant warm-session streaming.
+        Streams a byte range [start_byte, end_byte] with a background prefetch pipeline.
         """
         offset_chunks = start_byte // chunk_size
         total_bytes = end_byte - start_byte + 1
         chunks_to_stream = ceil(total_bytes / chunk_size)
         
-        # Check cache if single chunk request (e.g. video player metadata probe)
+        # Check cache if single chunk request (e.g. video player metadata probe / moov atom)
         cache_key = f"{file_id}_{offset_chunks}"
         if chunks_to_stream == 1:
             cached = await chunk_cache.get(cache_key)
@@ -51,12 +51,9 @@ class FastStreamEngine:
         if worker_pool.primary_bot and worker_pool.primary_bot != selected_client:
             clients_to_try.append(worker_pool.primary_bot)
 
-        bytes_streamed = 0
-        chunk_index = 0
-
         for client in clients_to_try:
             try:
-                # Fast path: If using primary bot and message is already provided, reuse it directly (0ms latency)
+                # Fast path: Re-use cached file message for primary bot (0ms message lookup)
                 if client == worker_pool.primary_bot and file_message is not None:
                     client_file = file_message
                 else:
@@ -65,49 +62,90 @@ class FastStreamEngine:
                 if not client_file or client_file.empty:
                     continue
 
+                # Sliding-window prefetch queue (holds up to PREFETCH_CHUNKS in memory)
+                prefetch_limit = max(2, getattr(Stream, 'PREFETCH_CHUNKS', 4))
+                chunk_queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=prefetch_limit)
+                
+                # Sentinel to indicate end of stream
+                sentinel = object()
+
+                async def prefetch_producer():
+                    """Background worker that continuously pulls chunks ahead of the player."""
+                    try:
+                        async for raw_chunk in client.stream_media(
+                            client_file,
+                            offset=offset_chunks,
+                            limit=chunks_to_stream,
+                        ):
+                            if not raw_chunk:
+                                break
+                            await chunk_queue.put(raw_chunk)
+                        await chunk_queue.put(sentinel)
+                    except asyncio.CancelledError:
+                        # Stream was seeked or aborted by client
+                        raise
+                    except Exception as exc:
+                        logger.warning(f"Prefetch producer error for msg {file_id}: {exc}")
+                        await chunk_queue.put(exc)
+
+                producer_task = asyncio.create_task(prefetch_producer())
+
                 bytes_streamed = 0
                 chunk_index = 0
 
-                async for chunk in client.stream_media(
-                    client_file,
-                    offset=offset_chunks,
-                    limit=chunks_to_stream,
-                ):
-                    if not chunk:
-                        break
+                try:
+                    while True:
+                        item = await chunk_queue.get()
+                        
+                        if item is sentinel:
+                            break
+                        
+                        if isinstance(item, Exception):
+                            raise item
 
-                    # Cache initial metadata chunks and single chunks in memory
-                    current_chunk_pos = offset_chunks + chunk_index
-                    if current_chunk_pos == 0 or chunks_to_stream == 1:
-                        await chunk_cache.set(f"{file_id}_{current_chunk_pos}", chunk)
+                        chunk: bytes = item
 
-                    # Trim first chunk if starting in the middle
-                    if chunk_index == 0:
-                        trim_start = start_byte % chunk_size
-                        if trim_start > 0:
-                            chunk = chunk[trim_start:]
+                        # Cache metadata chunks and single probes in memory for instant reuse
+                        current_chunk_pos = offset_chunks + chunk_index
+                        if current_chunk_pos == 0 or chunks_to_stream == 1:
+                            await chunk_cache.set(f"{file_id}_{current_chunk_pos}", chunk)
 
-                    remaining_bytes = content_length - bytes_streamed
-                    if remaining_bytes <= 0:
-                        break
+                        # Trim first chunk if starting in the middle of a boundary
+                        if chunk_index == 0:
+                            trim_start = start_byte % chunk_size
+                            if trim_start > 0:
+                                chunk = chunk[trim_start:]
 
-                    # Trim last chunk if ending in the middle
-                    if len(chunk) > remaining_bytes:
-                        chunk = chunk[:remaining_bytes]
+                        remaining_bytes = content_length - bytes_streamed
+                        if remaining_bytes <= 0:
+                            break
 
-                    if not chunk:
-                        break
+                        # Trim last chunk if ending in the middle of a boundary
+                        if len(chunk) > remaining_bytes:
+                            chunk = chunk[:remaining_bytes]
 
-                    yield chunk
-                    bytes_streamed += len(chunk)
-                    chunk_index += 1
-                
-                # If streaming completed or was started successfully, finish
+                        if not chunk:
+                            break
+
+                        yield chunk
+                        bytes_streamed += len(chunk)
+                        chunk_index += 1
+
+                finally:
+                    # Clean up: If player seeks or disconnects, instantly abort background prefetcher
+                    if not producer_task.done():
+                        producer_task.cancel()
+                        try:
+                            await producer_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+
+                # If streaming completed successfully, don't try fallback client
                 if bytes_streamed > 0 or chunks_to_stream == 0:
                     break
 
             except asyncio.CancelledError:
-                # Client disconnected or seeked
+                # Video player sought to a new position or closed the tab
                 break
             except Exception as e:
                 logger.warning(f"Client {client.name} stream error on msg {file_id}: {e}. Retrying fallback...")

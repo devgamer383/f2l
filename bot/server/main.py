@@ -182,8 +182,7 @@ async def web_player(file_id: int, filename: str):
     import os
     ext = os.path.splitext(filename)[1].lower()
     is_audio = mime_type.startswith('audio/')
-    is_browser_video = ext in ['.mp4', '.webm'] or mime_type in ['video/mp4', 'video/webm']
-    is_mkv = not is_audio and not is_browser_video
+    is_mkv = ext in ['.mkv', '.avi', '.flv', '.wmv', '.mov', '.ts'] or 'matroska' in mime_type
     
     return await render_template(
         'player.html',
@@ -193,7 +192,6 @@ async def web_player(file_id: int, filename: str):
         mediaLink=media_link,
         downloadLink=download_link,
         isAudio=is_audio,
-        isBrowserVideo=is_browser_video,
         isMkv=is_mkv,
         ext=ext.upper().lstrip('.')
     )
