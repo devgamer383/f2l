@@ -13,9 +13,10 @@ from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from bot import TelegramBot
 from bot.config import Telegram, Server
 from bot.modules.decorators import verify_user
-from bot.modules.telegram import format_bytes, render_progress
+from bot.modules.telegram import format_bytes, render_progress, make_progress_bar, format_eta
 from bot.stream.virtual import encode_batch, clean_virtual_name
 from bot.stream.uploader import fast_upload
+from bot.stream.worker import worker_pool
 
 # 1.95 GB slice size to stay safely within Telegram's 2,000 MB limit
 PART_SIZE = 1950 * 1024 * 1024
@@ -86,10 +87,24 @@ async def leech_command(client, msg: Message):
 
                 formatted_total = format_bytes(total_size)
 
-                # Case A: File is <= 2GB (Single file upload)
-                if total_size <= PART_SIZE:
-                    local_path = os.path.join(DOWNLOAD_DIR, filename)
+                available_bots = [c for c in worker_pool.clients if getattr(c, "is_connected", False)] if worker_pool.clients else [client]
+                if not available_bots:
+                    available_bots = [client]
+                num_bots = len(available_bots)
 
+                # Determine slicing strategy (if multiple bots available and file > 200MB, parallelize across bots)
+                if num_bots > 1 and total_size > 200 * 1024 * 1024:
+                    num_parts = max(num_bots, math.ceil(total_size / PART_SIZE))
+                else:
+                    num_parts = math.ceil(total_size / PART_SIZE)
+
+                slice_size = math.ceil(total_size / num_parts)
+                clean_name = clean_virtual_name(filename)
+                base_url = Server.BASE_URL.rstrip('/') if Server.BASE_URL else f"http://127.0.0.1:{Server.PORT}"
+
+                # Case 1: Small Single Part File (<= 200MB or single bot)
+                if num_parts == 1:
+                    local_path = os.path.join(DOWNLOAD_DIR, filename)
                     dl_start = time.time()
                     dl_state = {"last_edit": 0.0, "last_text": ""}
                     downloaded = 0
@@ -115,7 +130,6 @@ async def leech_command(client, msg: Message):
                                     except Exception:
                                         pass
 
-                    # Upload to storage channel with live progress callback
                     up_start = time.time()
                     up_state = {"last_edit": 0.0, "last_text": ""}
 
@@ -149,7 +163,6 @@ async def leech_command(client, msg: Message):
                     if os.path.exists(local_path):
                         os.remove(local_path)
 
-                    base_url = Server.BASE_URL.rstrip('/') if Server.BASE_URL else f"http://127.0.0.1:{Server.PORT}"
                     stream_url = f"{base_url}/inline/{sent.id}/{filename}"
                     player_url = f"{base_url}/stream/{sent.id}/{filename}"
                     download_url = f"{base_url}/dl/{sent.id}/{filename}"
@@ -174,121 +187,133 @@ async def leech_command(client, msg: Message):
                             InlineKeyboardButton("🎬 Open in VLC / Web Player", url=player_url)
                         ]
                     ]
-                    await status_msg.edit(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+                    await status_msg.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
                     return
 
-                # Case B: Large 10GB+ File (Automatic Slicing into 2GB parts)
-                num_parts = math.ceil(total_size / PART_SIZE)
-                msg_ids = []
-                clean_name = clean_virtual_name(filename)
+                # Case 2: Multi-Bot Parallel Pipelined Leech (200MB+ to 20GB+)
+                active_workers = min(num_bots, num_parts)
+                await status_msg.edit_text(
+                    f"🚀 **Multi-Bot Parallel Accelerator Engaged!**\n\n"
+                    f"📁 `{clean_name}` ({formatted_total})\n"
+                    f"🤖 **Worker Bots:** `{active_workers} Bots uploading simultaneously`\n"
+                    f"🧩 **Slices:** `{num_parts} parts` (~{format_bytes(slice_size)} each)"
+                )
 
+                part_progress = {i: 0 for i in range(num_parts)}
+                up_start = time.time()
+                up_state = {"last_edit": 0.0, "last_text": ""}
+                up_lock = asyncio.Lock()
+
+                async def update_aggregate_progress(part_idx, current_part_bytes):
+                    part_progress[part_idx] = current_part_bytes
+                    now = time.time()
+                    if now - up_state["last_edit"] < 3.5:
+                        return
+                    
+                    total_uploaded = sum(part_progress.values())
+                    elapsed = max(0.1, now - up_start)
+                    speed = total_uploaded / elapsed
+                    eta = max(0, total_size - total_uploaded) / speed if speed > 0 else 0
+                    bar, pct = make_progress_bar(total_uploaded, total_size)
+
+                    text = (
+                        f"📤 **Multi-Bot Parallel Upload:** `{clean_name}`\n"
+                        f"{bar} **{pct:.1f}%**\n\n"
+                        f"⚡ **Combined Speed:** `{format_bytes(int(speed))}/s` | ⏱️ **ETA:** `{format_eta(eta)}`\n"
+                        f"📦 **Uploaded:** `{format_bytes(total_uploaded)} / {formatted_total}`\n"
+                        f"🤖 **Workers:** `{active_workers} Bots active in parallel` ({num_parts} parts)"
+                    )
+                    async with up_lock:
+                        if text != up_state["last_text"]:
+                            try:
+                                await status_msg.edit_text(text)
+                                up_state["last_edit"] = now
+                                up_state["last_text"] = text
+                            except Exception:
+                                pass
+
+                msg_ids = [None] * num_parts
+                upload_tasks = []
+                upload_sem = asyncio.Semaphore(num_bots)
+
+                async def upload_worker_task(part_idx, p_path, p_name, p_len, bot_worker):
+                    async with upload_sem:
+                        async def p_cb(curr, tot):
+                            await update_aggregate_progress(part_idx, curr)
+
+                        uploaded_doc = await fast_upload(bot_worker, p_path, progress=p_cb)
+                        sent_slice = await bot_worker.send_document(
+                            chat_id=Telegram.CHANNEL_ID,
+                            document=uploaded_doc,
+                            file_name=p_name,
+                            caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`"
+                        )
+                        msg_ids[part_idx] = sent_slice.id
+                        part_progress[part_idx] = p_len
+                        await update_aggregate_progress(part_idx, p_len)
+
+                        if os.path.exists(p_path):
+                            os.remove(p_path)
+
+                # Download slices and pipe immediately to bot upload workers
                 for part_idx in range(num_parts):
                     part_num = part_idx + 1
-                    part_start = part_idx * PART_SIZE
-                    part_end = min(total_size - 1, (part_idx + 1) * PART_SIZE - 1)
+                    part_start = part_idx * slice_size
+                    part_end = min(total_size - 1, (part_idx + 1) * slice_size - 1)
                     part_len = part_end - part_start + 1
                     part_filename = f"{clean_name}.{part_num:03d}"
                     part_path = os.path.join(DOWNLOAD_DIR, part_filename)
 
                     range_hdr = {'Range': f'bytes={part_start}-{part_end}'}
-                    part_dl_start = time.time()
-                    dl_state = {"last_edit": 0.0, "last_text": ""}
-                    downloaded_slice = 0
-
                     async with session.get(url, headers=range_hdr, allow_redirects=True) as part_resp:
                         if part_resp.status not in (200, 206):
-                            await status_msg.edit(f"❌ Failed to download slice {part_num} (HTTP {part_resp.status})")
+                            await status_msg.edit_text(f"❌ Failed to download slice {part_num} (HTTP {part_resp.status})")
                             return
 
                         async with aiofiles.open(part_path, 'wb') as pf:
                             async for chunk in part_resp.content.iter_chunked(1024 * 1024):
                                 await pf.write(chunk)
-                                downloaded_slice += len(chunk)
-                                now = time.time()
-                                if now - dl_state["last_edit"] >= 3.5:
-                                    p_text = render_progress(
-                                        f"📥 **Downloading Slice ({part_num}/{num_parts})**",
-                                        part_filename,
-                                        downloaded_slice,
-                                        part_len,
-                                        part_dl_start,
-                                        extra_line=f"Overall `{formatted_total}` ({num_parts} parts)"
-                                    )
-                                    if p_text != dl_state["last_text"]:
-                                        try:
-                                            await status_msg.edit_text(p_text)
-                                            dl_state["last_edit"] = now
-                                            dl_state["last_text"] = p_text
-                                        except Exception:
-                                            pass
 
-                    # Upload slice to Telegram with live progress
-                    part_up_start = time.time()
-                    up_state = {"last_edit": 0.0, "last_text": ""}
-
-                    async def part_upload_progress(current, total):
-                        now = time.time()
-                        if now - up_state["last_edit"] < 3.5 and current != total:
-                            return
-                        p_text = render_progress(
-                            f"📤 **Uploading Slice ({part_num}/{num_parts})**",
-                            part_filename,
-                            current,
-                            total,
-                            part_up_start,
-                            extra_line=f"Overall `{formatted_total}` (Part {part_num} of {num_parts})"
-                        )
-                        if p_text != up_state["last_text"]:
-                            try:
-                                await status_msg.edit_text(p_text)
-                                up_state["last_edit"] = now
-                                up_state["last_text"] = p_text
-                            except Exception:
-                                pass
-
-                    uploaded_slice = await fast_upload(client, part_path, progress=part_upload_progress)
-                    sent_part = await client.send_document(
-                        chat_id=Telegram.CHANNEL_ID,
-                        document=uploaded_slice,
-                        file_name=part_filename,
-                        caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`"
+                    # Immediately launch upload worker for this slice
+                    bot_worker = available_bots[part_idx % num_bots]
+                    t = asyncio.create_task(
+                        upload_worker_task(part_idx, part_path, part_filename, part_len, bot_worker)
                     )
+                    upload_tasks.append(t)
 
-                    msg_ids.append(sent_part.id)
+                # Wait for all multi-bot upload workers to complete
+                await asyncio.gather(*upload_tasks)
 
-                    if os.path.exists(part_path):
-                        os.remove(part_path)
-
-                # All parts uploaded! Generate seamless 10GB+ virtual link
-                batch_token = encode_batch(msg_ids)
-                base_url = Server.BASE_URL.rstrip('/') if Server.BASE_URL else f"http://127.0.0.1:{Server.PORT}"
+                # Generate seamless 10GB+ virtual links
+                batch_token = encode_batch([m for m in msg_ids if m])
                 stream_url = f"{base_url}/inline/v/{batch_token}/{clean_name}"
                 player_url = f"{base_url}/v/{batch_token}/{clean_name}"
                 download_url = f"{base_url}/dl/v/{batch_token}/{clean_name}"
 
                 text = (
-                    f"🎬 **10GB+ Virtual Leech Complete!**\n\n"
+                    f"🎬 **Multi-Bot Parallel Leech Complete!**\n\n"
                     f"📁 **Merged Name:** `{clean_name}`\n"
                     f"📦 **Total Size:** `{formatted_total}` ({num_parts} Parts)\n"
+                    f"🤖 **Speed Boost:** Uploaded with {active_workers} bots in parallel!\n"
                     f"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching`\n\n"
-                    f"🔗 **Single Seamless 10GB Links:**\n"
+                    f"🔗 **Single Seamless Links:**\n"
                     f"• **Direct Stream:** [Click Here]({stream_url})\n"
                     f"• **Web & VLC Player:** [Click Here]({player_url})\n"
-                    f"• **Single 10GB Download:** [Click Here]({download_url})\n\n"
-                    f"💡 _All {num_parts} parts stream and seek seamlessly as one single 10GB+ file!_"
+                    f"• **Single Download:** [Click Here]({download_url})\n\n"
+                    f"💡 _All {num_parts} parts stream and seek seamlessly as one single contiguous file!_"
                 )
 
                 buttons = [
                     [
-                        InlineKeyboardButton("⚡ Stream 10GB Video", url=stream_url),
-                        InlineKeyboardButton("📥 Download (Single 10GB)", url=download_url)
+                        InlineKeyboardButton("⚡ Stream Merged Video", url=stream_url),
+                        InlineKeyboardButton("📥 Fast Download", url=download_url)
                     ],
                     [
                         InlineKeyboardButton("🎬 Open in Web / VLC Player", url=player_url)
                     ]
                 ]
 
-                await status_msg.edit(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+                await status_msg.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
 
     except Exception as e:
         await status_msg.edit(f"❌ Leech failed: {e}")
