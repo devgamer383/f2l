@@ -13,7 +13,7 @@ from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from bot import TelegramBot
 from bot.config import Telegram, Server
 from bot.modules.decorators import verify_user
-from bot.modules.telegram import format_bytes
+from bot.modules.telegram import format_bytes, render_progress
 from bot.stream.virtual import encode_batch, clean_virtual_name
 
 # 1.95 GB slice size to stay safely within Telegram's 2,000 MB limit
@@ -87,34 +87,62 @@ async def leech_command(client, msg: Message):
 
                 # Case A: File is <= 2GB (Single file upload)
                 if total_size <= PART_SIZE:
-                    await status_msg.edit(f"📥 Downloading single file: `{filename}` ({formatted_total})...")
                     local_path = os.path.join(DOWNLOAD_DIR, filename)
 
-                    last_edit = time.time()
+                    dl_start = time.time()
+                    dl_state = {"last_edit": 0.0, "last_text": ""}
                     downloaded = 0
 
                     async with aiofiles.open(local_path, 'wb') as f:
                         async for chunk in resp.content.iter_chunked(1024 * 1024):
                             await f.write(chunk)
                             downloaded += len(chunk)
-                            if time.time() - last_edit > 5:
-                                pct = (downloaded / total_size * 100) if total_size > 0 else 0
-                                try:
-                                    await status_msg.edit(
-                                        f"📥 Downloading: `{filename}`\n"
-                                        f"📊 Progress: `{format_bytes(downloaded)} / {formatted_total}` ({pct:.1f}%)"
-                                    )
-                                    last_edit = time.time()
-                                except Exception:
-                                    pass
+                            now = time.time()
+                            if now - dl_state["last_edit"] >= 3.5:
+                                p_text = render_progress(
+                                    "📥 **Downloading from URL**",
+                                    filename,
+                                    downloaded,
+                                    total_size,
+                                    dl_start
+                                )
+                                if p_text != dl_state["last_text"]:
+                                    try:
+                                        await status_msg.edit_text(p_text)
+                                        dl_state["last_edit"] = now
+                                        dl_state["last_text"] = p_text
+                                    except Exception:
+                                        pass
 
-                    # Upload to storage channel
-                    await status_msg.edit(f"📤 Uploading to Telegram channel: `{filename}`...")
+                    # Upload to storage channel with live progress callback
+                    up_start = time.time()
+                    up_state = {"last_edit": 0.0, "last_text": ""}
+
+                    async def upload_progress(current, total):
+                        now = time.time()
+                        if now - up_state["last_edit"] < 3.5 and current != total:
+                            return
+                        p_text = render_progress(
+                            "📤 **Uploading to Telegram**",
+                            filename,
+                            current,
+                            total,
+                            up_start
+                        )
+                        if p_text != up_state["last_text"]:
+                            try:
+                                await status_msg.edit_text(p_text)
+                                up_state["last_edit"] = now
+                                up_state["last_text"] = p_text
+                            except Exception:
+                                pass
+
                     sent = await client.send_document(
                         chat_id=Telegram.CHANNEL_ID,
                         document=local_path,
                         file_name=filename,
-                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`"
+                        caption=f"📁 `{filename}`\n📦 `{formatted_total}`",
+                        progress=upload_progress
                     )
 
                     if os.path.exists(local_path):
@@ -150,11 +178,6 @@ async def leech_command(client, msg: Message):
 
                 # Case B: Large 10GB+ File (Automatic Slicing into 2GB parts)
                 num_parts = math.ceil(total_size / PART_SIZE)
-                await status_msg.edit(
-                    f"🧩 **Large {formatted_total} File Detected!**\n"
-                    f"Slicing into **{num_parts} parts** (~1.95 GB each) and uploading to Telegram..."
-                )
-
                 msg_ids = []
                 clean_name = clean_virtual_name(filename)
 
@@ -167,10 +190,9 @@ async def leech_command(client, msg: Message):
                     part_path = os.path.join(DOWNLOAD_DIR, part_filename)
 
                     range_hdr = {'Range': f'bytes={part_start}-{part_end}'}
-                    await status_msg.edit(
-                        f"📥 Downloading **Part {part_num}/{num_parts}** ({format_bytes(part_len)})...\n"
-                        f"📁 `{part_filename}`"
-                    )
+                    part_dl_start = time.time()
+                    dl_state = {"last_edit": 0.0, "last_text": ""}
+                    downloaded_slice = 0
 
                     async with session.get(url, headers=range_hdr, allow_redirects=True) as part_resp:
                         if part_resp.status not in (200, 206):
@@ -180,17 +202,55 @@ async def leech_command(client, msg: Message):
                         async with aiofiles.open(part_path, 'wb') as pf:
                             async for chunk in part_resp.content.iter_chunked(1024 * 1024):
                                 await pf.write(chunk)
+                                downloaded_slice += len(chunk)
+                                now = time.time()
+                                if now - dl_state["last_edit"] >= 3.5:
+                                    p_text = render_progress(
+                                        f"📥 **Downloading Slice ({part_num}/{num_parts})**",
+                                        part_filename,
+                                        downloaded_slice,
+                                        part_len,
+                                        part_dl_start,
+                                        extra_line=f"Overall `{formatted_total}` ({num_parts} parts)"
+                                    )
+                                    if p_text != dl_state["last_text"]:
+                                        try:
+                                            await status_msg.edit_text(p_text)
+                                            dl_state["last_edit"] = now
+                                            dl_state["last_text"] = p_text
+                                        except Exception:
+                                            pass
 
-                    await status_msg.edit(
-                        f"📤 Uploading **Part {part_num}/{num_parts}** to Telegram...\n"
-                        f"📁 `{part_filename}`"
-                    )
+                    # Upload slice to Telegram with live progress
+                    part_up_start = time.time()
+                    up_state = {"last_edit": 0.0, "last_text": ""}
+
+                    async def part_upload_progress(current, total):
+                        now = time.time()
+                        if now - up_state["last_edit"] < 3.5 and current != total:
+                            return
+                        p_text = render_progress(
+                            f"📤 **Uploading Slice ({part_num}/{num_parts})**",
+                            part_filename,
+                            current,
+                            total,
+                            part_up_start,
+                            extra_line=f"Overall `{formatted_total}` (Part {part_num} of {num_parts})"
+                        )
+                        if p_text != up_state["last_text"]:
+                            try:
+                                await status_msg.edit_text(p_text)
+                                up_state["last_edit"] = now
+                                up_state["last_text"] = p_text
+                            except Exception:
+                                pass
 
                     sent_part = await client.send_document(
                         chat_id=Telegram.CHANNEL_ID,
                         document=part_path,
                         file_name=part_filename,
-                        caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`"
+                        caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`",
+                        progress=part_upload_progress
                     )
 
                     msg_ids.append(sent_part.id)

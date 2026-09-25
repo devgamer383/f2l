@@ -38,6 +38,54 @@ def format_bytes(size_bytes: int) -> str:
         i += 1
     return f"{size:.2f} {units[i]}"
 
+def make_progress_bar(current: int, total: int, width: int = 10) -> tuple[str, float]:
+    """Generates a visual progress bar e.g. [▰▰▰▰▱▱▱▱▱▱] 40.0%"""
+    if total <= 0:
+        return "[▱▱▱▱▱▱▱▱▱▱]", 0.0
+    pct = min(100.0, max(0.0, (current / total) * 100))
+    filled = int(round(width * current / float(total)))
+    filled = min(width, max(0, filled))
+    bar = "▰" * filled + "▱" * (width - filled)
+    return f"[{bar}]", pct
+
+def format_eta(seconds: float) -> str:
+    """Formats seconds into 00m 00s or 00h 00m format."""
+    if seconds < 0 or seconds > 86400 * 30:
+        return "--:--"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}h {m:02d}m"
+    return f"{m:02d}m {s:02d}s"
+
+def render_progress(
+    action: str,
+    filename: str,
+    current: int,
+    total: int,
+    start_time: float,
+    extra_line: str = ""
+) -> str:
+    """Renders a beautiful, compact progress card for Telegram messages."""
+    import time
+    elapsed = max(0.1, time.time() - start_time)
+    speed = current / elapsed
+    rem_bytes = max(0, total - current)
+    eta = rem_bytes / speed if speed > 0 else 0
+    bar, pct = make_progress_bar(current, total)
+
+    lines = [
+        f"{action}: `{filename}`",
+        f"{bar} **{pct:.1f}%**",
+        "",
+        f"⚡ **Speed:** `{format_bytes(int(speed))}/s` | ⏱️ **ETA:** `{format_eta(eta)}`",
+        f"📦 **Processed:** `{format_bytes(current)} / {format_bytes(total)}`"
+    ]
+    if extra_line:
+        lines.append(f"🧩 **Info:** {extra_line}")
+
+    return "\n".join(lines)
+
 async def get_message(message_id: int) -> Message | None:
     message = None
     try:
