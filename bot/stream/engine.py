@@ -45,112 +45,100 @@ class FastStreamEngine:
                     yield chunk
                 return
 
-        # Select client from worker pool
-        selected_client = await worker_pool.get_client()
-        clients_to_try = [selected_client]
-        if worker_pool.primary_bot and worker_pool.primary_bot != selected_client:
-            clients_to_try.append(worker_pool.primary_bot)
+        # Select client: Primary bot has the authenticated MTProto session across all DCs
+        client = worker_pool.primary_bot or await worker_pool.get_client()
 
-        for client in clients_to_try:
+        # Fast path: Re-use cached file message for primary bot (0ms message lookup)
+        if file_message is not None:
+            client_file = file_message
+        else:
+            client_file = await client.get_messages(Telegram.CHANNEL_ID, message_ids=file_id)
+        
+        if not client_file or client_file.empty:
+            return
+
+        # Sliding-window prefetch queue (holds up to PREFETCH_CHUNKS in memory)
+        prefetch_limit = max(2, getattr(Stream, 'PREFETCH_CHUNKS', 4))
+        chunk_queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=prefetch_limit)
+        
+        # Sentinel to indicate end of stream
+        sentinel = object()
+
+        async def prefetch_producer():
+            """Background worker that continuously pulls chunks ahead of the player."""
             try:
-                # Fast path: Re-use cached file message for primary bot (0ms message lookup)
-                if client == worker_pool.primary_bot and file_message is not None:
-                    client_file = file_message
-                else:
-                    client_file = await client.get_messages(Telegram.CHANNEL_ID, message_ids=file_id)
+                async for raw_chunk in client.stream_media(
+                    client_file,
+                    offset=offset_chunks,
+                    limit=chunks_to_stream,
+                ):
+                    if not raw_chunk:
+                        break
+                    await chunk_queue.put(raw_chunk)
+                await chunk_queue.put(sentinel)
+            except asyncio.CancelledError:
+                # Stream was seeked or aborted by client
+                raise
+            except Exception as exc:
+                logger.warning(f"Prefetch producer error for msg {file_id}: {exc}")
+                await chunk_queue.put(exc)
+
+        producer_task = asyncio.create_task(prefetch_producer())
+
+        bytes_streamed = 0
+        chunk_index = 0
+
+        try:
+            while True:
+                item = await chunk_queue.get()
                 
-                if not client_file or client_file.empty:
-                    continue
-
-                # Sliding-window prefetch queue (holds up to PREFETCH_CHUNKS in memory)
-                prefetch_limit = max(2, getattr(Stream, 'PREFETCH_CHUNKS', 4))
-                chunk_queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=prefetch_limit)
+                if item is sentinel:
+                    break
                 
-                # Sentinel to indicate end of stream
-                sentinel = object()
+                if isinstance(item, Exception):
+                    raise item
 
-                async def prefetch_producer():
-                    """Background worker that continuously pulls chunks ahead of the player."""
-                    try:
-                        async for raw_chunk in client.stream_media(
-                            client_file,
-                            offset=offset_chunks,
-                            limit=chunks_to_stream,
-                        ):
-                            if not raw_chunk:
-                                break
-                            await chunk_queue.put(raw_chunk)
-                        await chunk_queue.put(sentinel)
-                    except asyncio.CancelledError:
-                        # Stream was seeked or aborted by client
-                        raise
-                    except Exception as exc:
-                        logger.warning(f"Prefetch producer error for msg {file_id}: {exc}")
-                        await chunk_queue.put(exc)
+                chunk: bytes = item
 
-                producer_task = asyncio.create_task(prefetch_producer())
+                # Cache metadata chunks and single probes in memory for instant reuse
+                current_chunk_pos = offset_chunks + chunk_index
+                if current_chunk_pos == 0 or chunks_to_stream == 1:
+                    await chunk_cache.set(f"{file_id}_{current_chunk_pos}", chunk)
 
-                bytes_streamed = 0
-                chunk_index = 0
+                # Trim first chunk if starting in the middle of a boundary
+                if chunk_index == 0:
+                    trim_start = start_byte % chunk_size
+                    if trim_start > 0:
+                        chunk = chunk[trim_start:]
 
-                try:
-                    while True:
-                        item = await chunk_queue.get()
-                        
-                        if item is sentinel:
-                            break
-                        
-                        if isinstance(item, Exception):
-                            raise item
-
-                        chunk: bytes = item
-
-                        # Cache metadata chunks and single probes in memory for instant reuse
-                        current_chunk_pos = offset_chunks + chunk_index
-                        if current_chunk_pos == 0 or chunks_to_stream == 1:
-                            await chunk_cache.set(f"{file_id}_{current_chunk_pos}", chunk)
-
-                        # Trim first chunk if starting in the middle of a boundary
-                        if chunk_index == 0:
-                            trim_start = start_byte % chunk_size
-                            if trim_start > 0:
-                                chunk = chunk[trim_start:]
-
-                        remaining_bytes = content_length - bytes_streamed
-                        if remaining_bytes <= 0:
-                            break
-
-                        # Trim last chunk if ending in the middle of a boundary
-                        if len(chunk) > remaining_bytes:
-                            chunk = chunk[:remaining_bytes]
-
-                        if not chunk:
-                            break
-
-                        yield chunk
-                        bytes_streamed += len(chunk)
-                        chunk_index += 1
-
-                finally:
-                    # Clean up: If player seeks or disconnects, instantly abort background prefetcher
-                    if not producer_task.done():
-                        producer_task.cancel()
-                        try:
-                            await producer_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-
-                # If streaming completed successfully, don't try fallback client
-                if bytes_streamed > 0 or chunks_to_stream == 0:
+                remaining_bytes = content_length - bytes_streamed
+                if remaining_bytes <= 0:
                     break
 
-            except asyncio.CancelledError:
-                # Video player sought to a new position or closed the tab
-                break
-            except Exception as e:
-                logger.warning(f"Client {client.name} stream error on msg {file_id}: {e}. Retrying fallback...")
-                if client == clients_to_try[-1]:
-                    logger.error(f"All clients failed for msg {file_id}: {e}")
-                    raise
+                # Trim last chunk if ending in the middle of a boundary
+                if len(chunk) > remaining_bytes:
+                    chunk = chunk[:remaining_bytes]
+
+                if not chunk:
+                    break
+
+                yield chunk
+                bytes_streamed += len(chunk)
+                chunk_index += 1
+
+        except asyncio.CancelledError:
+            # Video player sought to a new position or closed the tab
+            return
+        except Exception as e:
+            logger.warning(f"Stream error on msg {file_id}: {e}")
+            raise
+        finally:
+            # Clean up: If player seeks or disconnects, instantly abort background prefetcher
+            if not producer_task.done():
+                producer_task.cancel()
+                try:
+                    await producer_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 fast_streamer = FastStreamEngine()

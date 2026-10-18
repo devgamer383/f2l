@@ -59,7 +59,7 @@ class VirtualStreamEngine:
                 return _meta_cache[batch_token]
 
         msg_ids = decode_batch(batch_token)
-        client = await worker_pool.get_client()
+        client = worker_pool.primary_bot or await worker_pool.get_client()
 
         # Batch fetch all messages in one single MTProto call
         messages = await client.get_messages(Telegram.CHANNEL_ID, message_ids=msg_ids)
@@ -89,7 +89,8 @@ class VirtualStreamEngine:
             parts.append({
                 "message_id": m.id,
                 "size": p_size,
-                "name": p_name
+                "name": p_name,
+                "message": m,
             })
             total_size += p_size
 
@@ -144,6 +145,7 @@ class VirtualStreamEngine:
                     start_byte=local_start,
                     end_byte=local_end,
                     content_length=slice_len,
+                    file_message=part.get("message"),
                     chunk_size=chunk_size
                 ):
                     if not chunk:

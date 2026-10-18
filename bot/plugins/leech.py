@@ -94,9 +94,9 @@ async def leech_command(client, msg: Message):
                     available_bots = [client]
                 num_bots = len(available_bots)
 
-                # Determine slicing strategy (if multiple bots available and file > 200MB, parallelize across bots)
-                if num_bots > 1 and total_size > 200 * 1024 * 1024:
-                    num_parts = max(num_bots, math.ceil(total_size / PART_SIZE))
+                # Only split if file exceeds Telegram's single-file limit (PART_SIZE ~1.95 GB)
+                if total_size <= PART_SIZE:
+                    num_parts = 1
                 else:
                     num_parts = math.ceil(total_size / PART_SIZE)
 
@@ -104,7 +104,7 @@ async def leech_command(client, msg: Message):
                 clean_name = clean_virtual_name(filename)
                 base_url = Server.BASE_URL.rstrip('/') if Server.BASE_URL else f"http://127.0.0.1:{Server.PORT}"
 
-                # Case 1: Small Single Part File (<= 200MB or single bot)
+                # Case 1: Single Part File (<= 2 GB, upload as normal using single bot without splitting)
                 if num_parts == 1:
                     local_path = os.path.join(DOWNLOAD_DIR, filename)
                     dl_start = time.time()
@@ -192,7 +192,7 @@ async def leech_command(client, msg: Message):
                     await status_msg.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
                     return
 
-                # Case 2: Multi-Bot Parallel Pipelined Leech (200MB+ to 20GB+)
+                # Case 2: Multi-Bot Parallel Pipelined Leech (> 2GB to 20GB+)
                 active_workers = min(num_bots, num_parts)
                 await status_msg.edit_text(
                     f"🚀 **Multi-Bot Parallel Accelerator Engaged!**\n\n"
@@ -235,67 +235,77 @@ async def leech_command(client, msg: Message):
                                 pass
 
                 msg_ids = [None] * num_parts
-                upload_tasks = []
-                upload_sem = asyncio.Semaphore(num_bots)
+                parts_queue = asyncio.Queue()
+                for i in range(num_parts):
+                    await parts_queue.put(i)
 
-                async def upload_worker_task(part_idx, p_path, p_name, p_len, bot_worker):
-                    async with upload_sem:
-                        async def p_cb(curr, tot):
-                            await update_aggregate_progress(part_idx, curr)
+                async def bot_worker_loop(bot_worker, worker_idx):
+                    while True:
+                        try:
+                            part_idx = parts_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+
+                        part_num = part_idx + 1
+                        part_start = part_idx * slice_size
+                        part_end = min(total_size - 1, (part_idx + 1) * slice_size - 1)
+                        part_len = part_end - part_start + 1
+                        part_filename = f"{clean_name}.{part_num:03d}"
+                        part_path = os.path.join(DOWNLOAD_DIR, part_filename)
 
                         try:
-                            sent_slice = await bot_worker.send_document(
-                                chat_id=Telegram.CHANNEL_ID,
-                                document=p_path,
-                                file_name=p_name,
-                                caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`",
-                                progress=p_cb
-                            )
-                        except Exception as e:
-                            logger.warning(f"Worker bot failed to send document ({e}), falling back to primary bot...")
-                            sent_slice = await client.send_document(
-                                chat_id=Telegram.CHANNEL_ID,
-                                document=p_path,
-                                file_name=p_name,
-                                caption=f"📁 `{p_name}` (Part {part_idx + 1}/{num_parts})\n📦 `{format_bytes(p_len)}`",
-                                progress=p_cb
-                            )
+                            # 1. Download slice from URL
+                            range_hdr = {'Range': f'bytes={part_start}-{part_end}'}
+                            async with session.get(url, headers=range_hdr, allow_redirects=True) as part_resp:
+                                if part_resp.status not in (200, 206):
+                                    raise RuntimeError(f"Failed to download slice {part_num} (HTTP {part_resp.status})")
 
-                        msg_ids[part_idx] = sent_slice.id
-                        part_progress[part_idx] = p_len
-                        await update_aggregate_progress(part_idx, p_len)
+                                async with aiofiles.open(part_path, 'wb') as pf:
+                                    async for chunk in part_resp.content.iter_chunked(1024 * 1024):
+                                        await pf.write(chunk)
 
-                        if os.path.exists(p_path):
-                            os.remove(p_path)
+                            # 2. Upload slice to Telegram
+                            async def p_cb(curr, tot):
+                                await update_aggregate_progress(part_idx, curr)
 
-                # Download slices and pipe immediately to bot upload workers
-                for part_idx in range(num_parts):
-                    part_num = part_idx + 1
-                    part_start = part_idx * slice_size
-                    part_end = min(total_size - 1, (part_idx + 1) * slice_size - 1)
-                    part_len = part_end - part_start + 1
-                    part_filename = f"{clean_name}.{part_num:03d}"
-                    part_path = os.path.join(DOWNLOAD_DIR, part_filename)
+                            try:
+                                sent_slice = await bot_worker.send_document(
+                                    chat_id=Telegram.CHANNEL_ID,
+                                    document=part_path,
+                                    file_name=part_filename,
+                                    caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`",
+                                    progress=p_cb
+                                )
+                            except Exception as e:
+                                logger.warning(f"Worker bot failed to send document ({e}), falling back to primary bot...")
+                                sent_slice = await client.send_document(
+                                    chat_id=Telegram.CHANNEL_ID,
+                                    document=part_path,
+                                    file_name=part_filename,
+                                    caption=f"📁 `{part_filename}` (Part {part_num}/{num_parts})\n📦 `{format_bytes(part_len)}`",
+                                    progress=p_cb
+                                )
 
-                    range_hdr = {'Range': f'bytes={part_start}-{part_end}'}
-                    async with session.get(url, headers=range_hdr, allow_redirects=True) as part_resp:
-                        if part_resp.status not in (200, 206):
-                            await status_msg.edit_text(f"❌ Failed to download slice {part_num} (HTTP {part_resp.status})")
-                            return
+                            msg_ids[part_idx] = sent_slice.id
+                            part_progress[part_idx] = part_len
+                            await update_aggregate_progress(part_idx, part_len)
 
-                        async with aiofiles.open(part_path, 'wb') as pf:
-                            async for chunk in part_resp.content.iter_chunked(1024 * 1024):
-                                await pf.write(chunk)
+                        finally:
+                            # 3. Clean up slice from disk immediately
+                            if os.path.exists(part_path):
+                                try:
+                                    os.remove(part_path)
+                                except Exception:
+                                    pass
+                            parts_queue.task_done()
 
-                    # Immediately launch upload worker for this slice
-                    bot_worker = available_bots[part_idx % num_bots]
-                    t = asyncio.create_task(
-                        upload_worker_task(part_idx, part_path, part_filename, part_len, bot_worker)
-                    )
-                    upload_tasks.append(t)
+                worker_tasks = [
+                    asyncio.create_task(bot_worker_loop(available_bots[i], i))
+                    for i in range(active_workers)
+                ]
 
                 # Wait for all multi-bot upload workers to complete
-                await asyncio.gather(*upload_tasks)
+                await asyncio.gather(*worker_tasks)
 
                 # Generate seamless 10GB+ virtual links
                 batch_token = encode_batch([m for m in msg_ids if m])
