@@ -25,7 +25,6 @@ type PlayerData struct {
 }
 
 func RenderPlayer(w io.Writer, data PlayerData) error {
-	// Simple token replacement to maintain 100% compatibility with the jinja template
 	tmpl := playerHTMLTemplate
 	tmpl = strings.ReplaceAll(tmpl, "{{ filename }}", template.HTMLEscapeString(data.Filename))
 	tmpl = strings.ReplaceAll(tmpl, "{{ filesize }}", template.HTMLEscapeString(data.Filesize))
@@ -34,16 +33,31 @@ func RenderPlayer(w io.Writer, data PlayerData) error {
 	tmpl = strings.ReplaceAll(tmpl, "{{ downloadLink }}", template.HTMLEscapeString(data.DownloadLink))
 	tmpl = strings.ReplaceAll(tmpl, "{{ ext }}", template.HTMLEscapeString(strings.ToUpper(strings.TrimPrefix(data.Ext, "."))))
 	tmpl = strings.ReplaceAll(tmpl, "{{ version }}", template.HTMLEscapeString(data.Version))
+	tmpl = strings.ReplaceAll(tmpl, "{{ isMkv }}", fmt.Sprintf("%t", data.IsMkv))
+	tmpl = strings.ReplaceAll(tmpl, "{{ isAudio }}", fmt.Sprintf("%t", data.IsAudio))
 
 	if data.IsAudio {
+		tmpl = strings.ReplaceAll(tmpl, "{{ audioDisplay }}", "block")
+		tmpl = strings.ReplaceAll(tmpl, "{{ videoDisplay }}", "none")
 		tmpl = strings.ReplaceAll(tmpl, "{% if isAudio %}", "")
 		tmpl = strings.ReplaceAll(tmpl, "{% else %}", "<!--")
 		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "-->")
 	} else {
-		// Video player
+		tmpl = strings.ReplaceAll(tmpl, "{{ audioDisplay }}", "none")
+		tmpl = strings.ReplaceAll(tmpl, "{{ videoDisplay }}", "block")
 		tmpl = strings.ReplaceAll(tmpl, "{% if isAudio %}", "<!--")
 		tmpl = strings.ReplaceAll(tmpl, "{% else %}", "-->")
 		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "")
+	}
+
+	if data.IsMkv {
+		tmpl = strings.ReplaceAll(tmpl, "{{ mkvNoticeDisplay }}", "flex")
+		tmpl = strings.ReplaceAll(tmpl, "{% if isMkv %}", "")
+		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "")
+	} else {
+		tmpl = strings.ReplaceAll(tmpl, "{{ mkvNoticeDisplay }}", "none")
+		tmpl = strings.ReplaceAll(tmpl, "{% if isMkv %}", "<!--")
+		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "-->")
 	}
 
 	_, err := fmt.Fprint(w, tmpl)

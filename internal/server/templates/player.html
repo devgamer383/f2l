@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="X-UA-Compatible" content="ie=edge">
-  <title>{{ filename }} - Stream</title>
+  <title>{{ filename }} - JPlayer Stream</title>
   
   <!-- Modern Font & Icons -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -12,27 +12,25 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   
-  <!-- Plyr Video Player CSS -->
-  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+  <!-- JPlayer Cinema CSS with CDN & Local Fallback -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.css" onerror="this.onerror=null;this.href='/static/jplayer/plyr.css';" />
 
   <style>
     :root {
       --bg-primary: #0a0c10;
       --bg-surface: #12161f;
-      --bg-card: rgba(26, 31, 44, 0.7);
+      --bg-card: rgba(26, 31, 44, 0.75);
       --border-color: rgba(255, 255, 255, 0.08);
       --accent-primary: #3b82f6;
       --accent-hover: #2563eb;
       --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+      --imax-gradient: linear-gradient(135deg, #0072ff 0%, #00c6ff 100%);
       --text-primary: #f8fafc;
       --text-secondary: #94a3b8;
       --text-muted: #64748b;
       --success: #10b981;
       --warning: #f59e0b;
-      --vlc: #ff8800;
-      --mx: #8b5cf6;
-      --pot: #eab308;
-      --mpv: #a855f7;
+      --plyr-color-main: #3b82f6;
     }
 
     * {
@@ -54,11 +52,11 @@
 
     .container {
       width: 100%;
-      max-width: 1000px;
+      max-width: 1050px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 18px;
     }
 
     /* Header Bar */
@@ -77,11 +75,25 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      font-size: 1.1rem;
-      font-weight: 700;
+      font-size: 1.15rem;
+      font-weight: 800;
       background: var(--accent-gradient);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-tag {
+      font-size: 0.7rem;
+      font-weight: 700;
+      background: rgba(59, 130, 246, 0.2);
+      color: var(--accent-primary);
+      padding: 2px 8px;
+      border-radius: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      -webkit-text-fill-color: var(--accent-primary);
     }
 
     .status-badge {
@@ -117,7 +129,7 @@
       background: #000;
       border-radius: 16px;
       overflow: hidden;
-      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
+      box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.85);
       border: 1px solid var(--border-color);
     }
 
@@ -127,7 +139,94 @@
       --plyr-color-main: #3b82f6;
     }
 
-    /* Audio Track Selector Bar */
+    /* Cinema Pro Tools Toolbar */
+    .cinema-tools-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 12px 18px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      backdrop-filter: blur(10px);
+    }
+
+    .cinema-tools-group {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .cinema-tool-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-right: 4px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .cinema-tool-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-color);
+      padding: 7px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      user-select: none;
+    }
+
+    .cinema-tool-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-primary);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .cinema-tool-btn.active {
+      background: rgba(59, 130, 246, 0.25);
+      color: #60a5fa;
+      border-color: rgba(59, 130, 246, 0.5);
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .cinema-tool-btn.active-imax {
+      background: rgba(0, 198, 255, 0.2);
+      color: #38bdf8;
+      border-color: rgba(0, 198, 255, 0.5);
+      box-shadow: 0 0 12px rgba(0, 198, 255, 0.3);
+    }
+
+    .cinema-tool-select {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-family: inherit;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+
+    .cinema-tool-select:focus {
+      border-color: var(--accent-primary);
+    }
+
+    /* Audio Track & Subtitle Track Selector Bar */
     .track-control-bar {
       display: none;
       align-items: center;
@@ -166,34 +265,10 @@
       border-color: var(--accent-primary);
     }
 
-    /* Codec Helper Banner */
-    .codec-notice {
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      padding: 14px 18px;
-      background: rgba(59, 130, 246, 0.08);
-      border: 1px solid rgba(59, 130, 246, 0.25);
-      border-radius: 14px;
-      font-size: 0.85rem;
-      color: var(--text-secondary);
-      line-height: 1.45;
-    }
-
-    .codec-notice i {
-      color: var(--accent-primary);
-      font-size: 1.1rem;
-      margin-top: 2px;
-    }
-
-    .codec-notice strong {
-      color: var(--text-primary);
-    }
-
     /* 1-Click External App Launchers */
     .launchers-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 10px;
     }
 
@@ -202,7 +277,7 @@
       align-items: center;
       justify-content: center;
       gap: 10px;
-      padding: 12px 14px;
+      padding: 11px 12px;
       border-radius: 12px;
       font-weight: 600;
       font-size: 0.85rem;
@@ -214,7 +289,7 @@
     }
 
     .btn-launcher i {
-      font-size: 1.3rem;
+      font-size: 1.25rem;
     }
 
     .btn-launcher-vlc {
@@ -257,6 +332,40 @@
       transform: translateY(-2px);
     }
 
+    .btn-launcher-nplayer {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border-color: rgba(59, 130, 246, 0.35);
+    }
+    .btn-launcher-nplayer:hover {
+      background: rgba(59, 130, 246, 0.28);
+      transform: translateY(-2px);
+    }
+
+    /* Codec Helper Banner */
+    .codec-notice {
+      display: {{ mkvNoticeDisplay }};
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 18px;
+      background: rgba(59, 130, 246, 0.08);
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      border-radius: 14px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    .codec-notice i {
+      color: var(--accent-primary);
+      font-size: 1.15rem;
+      margin-top: 2px;
+    }
+
+    .codec-notice strong {
+      color: var(--text-primary);
+    }
+
     /* Meta Info Card */
     .meta-card {
       background: var(--bg-surface);
@@ -294,6 +403,12 @@
       font-size: 0.8rem;
       font-weight: 500;
       color: var(--text-secondary);
+    }
+
+    .badge-accent {
+      color: #60a5fa;
+      border-color: rgba(59, 130, 246, 0.35);
+      background: rgba(59, 130, 246, 0.12);
     }
 
     /* Action Buttons Grid */
@@ -337,7 +452,7 @@
       transform: translateY(-2px);
     }
 
-    /* Audio Player Specific */
+    /* Audio Player Specific Card */
     .audio-player-card {
       background: var(--bg-surface);
       border: 1px solid var(--border-color);
@@ -406,6 +521,7 @@
       <div class="brand">
         <i class="fa-solid fa-bolt"></i>
         <span>FileStream</span>
+        <span class="brand-tag">JPlayer 🎬</span>
       </div>
       <div class="status-badge">
         <span class="dot"></span>
@@ -413,25 +529,72 @@
       </div>
     </header>
 
-    <!-- Player Area (Plays MP4, MKV, WebM, etc.) -->
+    <!-- Player Area (Handles MP4, MKV, WebM, Audio) -->
     <main class="player-wrapper">
-      {% if isAudio %}
-      <div class="audio-player-card">
-        <div class="audio-icon-box">
-          <i class="fa-solid fa-music"></i>
+      <!-- Audio Container -->
+      <div id="audio-container" style="display: {{ audioDisplay }};">
+        <div class="audio-player-card">
+          <div class="audio-icon-box">
+            <i class="fa-solid fa-music"></i>
+          </div>
+          <audio id="stream-audio" controls preload="auto" style="width: 100%; max-width: 600px;">
+            <source src="{{ mediaLink }}" type="{{ mimeType }}">
+            Your browser does not support audio streaming.
+          </audio>
         </div>
-        <audio id="stream-media" controls preload="auto" style="width: 100%; max-width: 600px;">
-          <source src="{{ mediaLink }}" type="{{ mimeType }}">
-          Your browser does not support audio streaming.
-        </audio>
       </div>
-      {% else %}
-      <video id="stream-media" controls playsinline preload="auto">
-        <source src="{{ mediaLink }}" type="{{ mimeType }}">
-        <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
-      </video>
-      {% endif %}
+
+      <!-- Video Container -->
+      <div id="video-container" style="display: {{ videoDisplay }};">
+        <video id="stream-media" controls playsinline preload="auto">
+          <source src="{{ mediaLink }}" type="{{ mimeType }}">
+          <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
+        </video>
+      </div>
     </main>
+
+    <!-- JPlayer Cinema Pro Tools Bar -->
+    <section class="cinema-tools-bar">
+      <div class="cinema-tools-group">
+        <span class="cinema-tool-label"><i class="fa-solid fa-sliders"></i> Cinema Pro:</span>
+        
+        <button id="btn-imax" class="cinema-tool-btn" onclick="toggleImaxMode()" title="Toggle IMAX 1.90:1 Expanded Aspect Ratio">
+          <i class="fa-solid fa-expand"></i>
+          <span>IMAX 1.90:1</span>
+        </button>
+
+        <button id="btn-tone" class="cinema-tool-btn" onclick="toggleToneMap()" title="Toggle Smart SDR Tone Mapping for HDR / Dolby Vision">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>Tone Map</span>
+        </button>
+
+        <button id="btn-dialogue" class="cinema-tool-btn" onclick="toggleDialogue()" title="Boost speech clarity using dynamics compressor">
+          <i class="fa-solid fa-comment-dots"></i>
+          <span>Dialogue Boost</span>
+        </button>
+
+        <button id="btn-spatial" class="cinema-tool-btn" onclick="toggleSpatial()" title="Enable 3D HRTF Spatial Surround Sound for headphones">
+          <i class="fa-solid fa-headphones"></i>
+          <span>3D Surround</span>
+        </button>
+      </div>
+
+      <div class="cinema-tools-group">
+        <span class="cinema-tool-label"><i class="fa-solid fa-music"></i> EQ:</span>
+        <select id="eq-preset-select" class="cinema-tool-select" onchange="changeEqPreset(this.value)" title="10-Band Graphic Audio Equalizer Preset">
+          <option value="cinema" selected>Cinema EQ</option>
+          <option value="vocal">Vocal Focus</option>
+          <option value="bass">Bass Boost</option>
+          <option value="night">Night Mode</option>
+          <option value="flat">Studio Flat</option>
+        </select>
+
+        <button id="btn-local" class="cinema-tool-btn" onclick="openLocal50GBFile()" title="Play local 50GB+ 4K MKV files with zero memory bloat">
+          <i class="fa-solid fa-folder-open"></i>
+          <span>Local File</span>
+        </button>
+      </div>
+    </section>
 
     <!-- Multi-Audio & Subtitle Track Selector Bar (Visible when tracks detected) -->
     <div id="track-control-bar" class="track-control-bar">
@@ -452,7 +615,7 @@
       </div>
     </div>
 
-    <!-- 1-Click External Player Launchers (Always available for VLC / MX Player) -->
+    <!-- 1-Click External Player Launchers (Always available for VLC / MX Player / PotPlayer / MPV) -->
     <div class="launchers-grid">
       <button class="btn-launcher btn-launcher-vlc" onclick="openInVLC()">
         <i class="fa-brands fa-vlc"></i>
@@ -485,17 +648,23 @@
           <small style="font-size: 0.72rem; opacity: 0.85;">PC / Linux / Mac</small>
         </div>
       </button>
+
+      <button class="btn-launcher btn-launcher-nplayer" onclick="openInNPlayer()">
+        <i class="fa-solid fa-compass"></i>
+        <div>
+          <div>Play in nPlayer</div>
+          <small style="font-size: 0.72rem; opacity: 0.85;">iOS / iPad / Mac</small>
+        </div>
+      </button>
     </div>
 
-    {% if isMkv %}
-    <!-- Format notice for MKV with multi-channel Dolby/DTS audio -->
+    <!-- MKV Streamer Tip Notice -->
     <div class="codec-notice">
       <i class="fa-solid fa-circle-info"></i>
       <div>
-        <strong>{{ ext }} Media Tip:</strong> Playing in web browser. If your file contains multi-channel cinema Dolby (AC3/E-AC3) or DTS audio with no sound in browser, click <strong>Play in VLC</strong> or <strong>MX Player</strong> above for 100% audio & subtitle support!
+        <strong>{{ ext }} JPlayer Streaming:</strong> In-browser EBML demuxing & fMP4 hardware remuxing active. If your video contains cinema multi-channel Dolby (AC3/E-AC3) or DTS audio with no sound in your browser, tap <strong>Play in VLC</strong> or <strong>MX Player</strong> above for 100% audio & subtitle passthrough!
       </div>
     </div>
-    {% endif %}
 
     <!-- Meta & Actions Card -->
     <section class="meta-card">
@@ -504,6 +673,7 @@
         <div class="file-badges">
           <span class="badge"><i class="fa-solid fa-hard-drive"></i> {{ filesize }}</span>
           <span class="badge"><i class="fa-solid fa-file-lines"></i> {{ mimeType }}</span>
+          <span class="badge badge-accent"><i class="fa-solid fa-film"></i> JPlayer v3 Client Demuxer</span>
           <span class="badge"><i class="fa-solid fa-gauge-high"></i> RFC 7233 Stream Ready</span>
         </div>
       </div>
@@ -524,7 +694,7 @@
 
     <!-- Footer -->
     <footer class="footer">
-      Powered by <strong>FileStream Engine v{{ version }}</strong> • Fast MTProto Parallel Streaming
+      Powered by <strong>JPlayer Stream Engine v{{ version }}</strong> • Fast Parallel MTProto Streaming
     </footer>
   </div>
 
@@ -534,50 +704,135 @@
     <span id="toast-text">Link copied to clipboard!</span>
   </div>
 
-  <!-- Plyr Video Player JS -->
-  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+  <!-- JPlayer Polyfilled Bundle with Fallback -->
+  <script src="https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.polyfilled.min.js" onerror="this.onerror=null;this.src='/static/jplayer/plyr.polyfilled.min.js';"></script>
+  
   <script>
+    const isMkv = {{ isMkv }};
+    const isAudio = {{ isAudio }};
     const mediaLink = "{{ mediaLink }}";
     const downloadLink = "{{ downloadLink }}";
     const mimeType = "{{ mimeType }}";
 
-    // Initialize Plyr Player
-    const player = new Plyr('#stream-media', {
+    const targetSelector = isAudio ? '#stream-audio' : '#stream-media';
+    const videoElement = document.querySelector(targetSelector);
+
+    // Initialize JPlayer
+    const player = new Plyr(targetSelector, {
       controls: [
         'play-large', 'restart', 'rewind', 'play', 'fast-forward',
         'progress', 'current-time', 'duration', 'mute', 'volume',
-        'captions', 'settings', 'pip', 'airplay', 'fullscreen'
+        'captions', 'settings', 'pip', 'airplay', 'imax', 'fullscreen'
       ],
-      settings: ['speed', 'loop'],
+      settings: ['audio', 'captions', 'quality', 'speed', 'loop'],
       speed: { selected: 1, options: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
       seekTime: 10,
       keyboard: { focused: true, global: true },
-      tooltips: { controls: true, seek: true }
+      tooltips: { controls: true, seek: true },
+      iconUrl: 'https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.svg',
     });
 
+    // In-Browser Client-Side MKV Streaming via JPlayer
+    if (isMkv && typeof player.loadMkv === 'function') {
+      console.log('JPlayer: Initializing client-side MKV streaming engine for', mediaLink);
+      player.loadMkv(mediaLink).catch(err => {
+        console.warn('JPlayer MKV streamer error:', err);
+      });
+    }
+
+    // JPlayer Cinema Pro Toolbar Handlers
+    function toggleImaxMode() {
+      const btn = document.getElementById('btn-imax');
+      if (typeof player.toggleImax === 'function') {
+        const active = player.toggleImax();
+        btn.classList.toggle('active-imax', Boolean(active));
+        showToast(active ? '🎬 IMAX 1.90:1 Mode Activated' : 'Standard Aspect Ratio Restored');
+      } else {
+        showToast('IMAX mode not supported on this stream');
+      }
+    }
+
+    function toggleToneMap() {
+      const btn = document.getElementById('btn-tone');
+      if (typeof player.toggleToneMapping === 'function') {
+        const active = player.toggleToneMapping();
+        btn.classList.toggle('active', Boolean(active));
+        showToast(active ? '✨ Smart SDR Tone Mapping ON' : 'Smart Tone Mapping OFF');
+      } else {
+        showToast('Tone mapping not available');
+      }
+    }
+
+    function toggleDialogue() {
+      const btn = document.getElementById('btn-dialogue');
+      if (typeof player.toggleDialogueBoost === 'function') {
+        const active = player.toggleDialogueBoost();
+        btn.classList.toggle('active', Boolean(active));
+        showToast(active ? '🗣️ Dialogue Clarity Boost ON' : 'Dialogue Boost OFF');
+      } else {
+        showToast('Dialogue Boost not available');
+      }
+    }
+
+    function toggleSpatial() {
+      const btn = document.getElementById('btn-spatial');
+      if (typeof player.toggleSpatialAudio === 'function') {
+        const active = player.toggleSpatialAudio();
+        btn.classList.toggle('active', Boolean(active));
+        showToast(active ? '🎧 3D Spatial Surround ON' : 'Spatial Audio OFF');
+      } else {
+        showToast('3D Spatial Audio not available');
+      }
+    }
+
+    function changeEqPreset(val) {
+      if (typeof player.setAudioPreset === 'function') {
+        player.setAudioPreset(val);
+        showToast('Equalizer: ' + val.charAt(0).toUpperCase() + val.slice(1));
+      }
+    }
+
+    function openLocal50GBFile() {
+      if (typeof player.openLocalFile === 'function') {
+        player.openLocalFile();
+      } else {
+        showToast('Local file picker not supported');
+      }
+    }
+
     // Multi-Audio & Subtitle Track Detection
-    const videoElement = document.getElementById('stream-media');
-    
     function detectMediaTracks() {
       if (!videoElement) return;
 
       const trackBar = document.getElementById('track-control-bar');
       let hasCustomControls = false;
 
-      // 1. Detect Multi-Audio Tracks (HTMLMediaElement.audioTracks API)
-      if (videoElement.audioTracks && videoElement.audioTracks.length > 1) {
+      // 1. Detect Multi-Audio Tracks (HTMLMediaElement.audioTracks API or JPlayer audioManager)
+      const jplayerTracks = player.audioTracks || [];
+      const nativeTracks = videoElement.audioTracks || [];
+
+      if (jplayerTracks.length > 1 || nativeTracks.length > 1) {
         const audioGroup = document.getElementById('audio-track-group');
         const audioSelect = document.getElementById('audio-track-select');
         audioSelect.innerHTML = '';
 
-        for (let i = 0; i < videoElement.audioTracks.length; i++) {
-          const track = videoElement.audioTracks[i];
-          const option = document.createElement('option');
-          option.value = i;
-          const label = track.label || track.language || ('Audio ' + (i + 1));
-          option.textContent = label + (track.enabled ? ' (Active)' : '');
-          if (track.enabled) option.selected = true;
-          audioSelect.appendChild(option);
+        if (jplayerTracks.length > 1) {
+          jplayerTracks.forEach((track, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = (track.label || track.language || ('Track ' + (i + 1))) + (track.isDolby ? ' (Dolby)' : '');
+            if (i === (player.activeAudioTrack || 0)) opt.selected = true;
+            audioSelect.appendChild(opt);
+          });
+        } else {
+          for (let i = 0; i < nativeTracks.length; i++) {
+            const track = nativeTracks[i];
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = track.label || track.language || ('Audio ' + (i + 1));
+            if (track.enabled) opt.selected = true;
+            audioSelect.appendChild(opt);
+          }
         }
 
         audioGroup.style.display = 'flex';
@@ -608,12 +863,15 @@
       }
     }
 
-    // Switch Audio Track (like VLC)
+    // Switch Audio Track
     function switchAudioTrack(trackIndex) {
-      if (!videoElement || !videoElement.audioTracks) return;
       const idx = parseInt(trackIndex, 10);
-      for (let i = 0; i < videoElement.audioTracks.length; i++) {
-        videoElement.audioTracks[i].enabled = (i === idx);
+      if (typeof player.setAudioTrack === 'function') {
+        player.setAudioTrack(idx);
+      } else if (videoElement && videoElement.audioTracks) {
+        for (let i = 0; i < videoElement.audioTracks.length; i++) {
+          videoElement.audioTracks[i].enabled = (i === idx);
+        }
       }
       showToast('Switched to Audio Track ' + (idx + 1));
     }
@@ -628,10 +886,13 @@
       showToast(idx === -1 ? 'Subtitles turned off' : 'Subtitles enabled');
     }
 
+    // Listeners for track detection
     if (videoElement) {
       videoElement.addEventListener('loadedmetadata', detectMediaTracks);
       videoElement.addEventListener('canplay', detectMediaTracks);
     }
+    player.on('audiotracks', detectMediaTracks);
+    player.on('audiotrackchange', detectMediaTracks);
 
     // Toast Notification helper
     function showToast(text) {
@@ -641,7 +902,7 @@
       toast.classList.add('show');
       setTimeout(() => {
         toast.classList.remove('show');
-      }, 2500);
+      }, 2600);
     }
 
     // Copy Direct Stream URL
@@ -680,6 +941,11 @@
     function openInMPV() {
       window.location.href = 'mpv://' + mediaLink;
       showToast('Launching MPV Player...');
+    }
+
+    function openInNPlayer() {
+      window.location.href = 'nplayer-' + mediaLink;
+      showToast('Launching nPlayer...');
     }
   </script>
 </body>
