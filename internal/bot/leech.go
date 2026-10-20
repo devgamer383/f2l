@@ -274,9 +274,10 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		}
 
 		slug := security.EncodeFileSlug(sentMsgID, b.cfg.Telegram.BotToken)
-		streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, filename)
-		playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, filename)
-		downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, filename)
+		safeFilename := url.PathEscape(filename)
+		streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, safeFilename)
+		playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, safeFilename)
+		downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, safeFilename)
 
 		successText := fmt.Sprintf(
 			"🎬 **Leech Complete! (Go Fast-Engine)**\n\n"+
@@ -550,9 +551,10 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 	batchToken := stream.EncodeBatch(validIDs)
 	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
-	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, cleanName)
-	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, slug, cleanName)
-	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, cleanName)
+	safeCleanName := url.PathEscape(cleanName)
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, safeCleanName)
+	playerURL := fmt.Sprintf("%s/v/%s/%s?v=v2", baseURL, slug, safeCleanName)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, safeCleanName)
 
 	successText := fmt.Sprintf(
 		"🎬 **Multi-Bot Parallel Leech Complete! (Go Engine)**\n\n"+
