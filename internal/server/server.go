@@ -102,6 +102,9 @@ func (s *Server) setupRoutes() {
 
 	r.Get("/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 	r.Get("/stream/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
+
+	// Static Assets (Embedded JPlayer dist)
+	s.registerStaticRoutes()
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
