@@ -79,20 +79,26 @@ heroku ps:scale web=1
 
 ## 💻 Local / Docker Deployment
 
-### Run Locally:
+### Run Locally (Go):
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Download dependencies
+go mod download
 
-# 2. Run the bot
-python -m bot
+# 2. Build and run
+go run ./cmd/bot
 ```
 
 ### Run with Docker:
 ```bash
-docker build -t filestreambot .
-docker run -p 8080:8080 --env-file .env filestreambot
+docker build -t filestream-go .
+docker run -p 8080:8080 --env-file .env filestream-go
 ```
+
+### Deploy to Botkeep / Cloud Containers:
+1. Connect this repository to your container host.
+2. Select **Docker** or **Go 1.23**.
+3. Set your environment variables in the dashboard.
+4. Expose port `8080`.
 
 ---
 
