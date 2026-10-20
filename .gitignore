@@ -10,6 +10,7 @@ event-log.txt
 bin/
 data/
 downloads/
-botkeep-deploy.zip
-f2l
-bot
+/botkeep-deploy.zip
+/f2l
+/bot
+/filestream

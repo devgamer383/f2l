@@ -41,6 +41,10 @@ func main() {
 
 	slog.Info("🚀 Initializing Telegram File-to-Link Service (Go Edition)")
 
+	// Wipe any leftover temporary downloads from past runs
+	_ = os.RemoveAll("downloads")
+	_ = os.MkdirAll("downloads", 0755)
+
 	// 2. Load Configuration
 	cfg := config.Load()
 
