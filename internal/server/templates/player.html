@@ -12,8 +12,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   
-  <!-- JPlayer Cinema CSS with CDN & Local Fallback -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.css" onerror="this.onerror=null;this.href='/static/jplayer/plyr.css';" />
+  <!-- JPlayer Cinema CSS -->
+  <link rel="stylesheet" href="/static/jplayer/plyr.css" />
 
   <style>
     :root {
@@ -30,6 +30,7 @@
       --text-muted: #64748b;
       --success: #10b981;
       --warning: #f59e0b;
+      --danger: #ef4444;
       --plyr-color-main: #3b82f6;
     }
 
@@ -342,9 +343,9 @@
       transform: translateY(-2px);
     }
 
-    /* Codec Helper Banner */
+    /* Fallback Alert Banner (When browser cannot decode MKV or cinema audio) */
     .codec-notice {
-      display: {{ mkvNoticeDisplay }};
+      display: flex;
       align-items: flex-start;
       gap: 12px;
       padding: 14px 18px;
@@ -364,6 +365,25 @@
 
     .codec-notice strong {
       color: var(--text-primary);
+    }
+
+    .codec-error-alert {
+      display: none;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 18px;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      border-radius: 14px;
+      font-size: 0.88rem;
+      color: #fca5a5;
+      line-height: 1.45;
+    }
+
+    .codec-error-alert i {
+      color: var(--danger);
+      font-size: 1.3rem;
+      margin-top: 2px;
     }
 
     /* Meta Info Card */
@@ -537,8 +557,8 @@
           <div class="audio-icon-box">
             <i class="fa-solid fa-music"></i>
           </div>
-          <audio id="stream-audio" controls preload="auto" style="width: 100%; max-width: 600px;">
-            <source src="{{ mediaLink }}" type="{{ mimeType }}">
+          <audio id="stream-audio" controls preload="auto" src="{{ mediaLink }}" style="width: 100%; max-width: 600px;">
+            <source src="{{ mediaLink }}">
             Your browser does not support audio streaming.
           </audio>
         </div>
@@ -546,8 +566,8 @@
 
       <!-- Video Container -->
       <div id="video-container" style="display: {{ videoDisplay }};">
-        <video id="stream-media" controls playsinline preload="auto">
-          <source src="{{ mediaLink }}" type="{{ mimeType }}">
+        <video id="stream-media" controls playsinline preload="auto" src="{{ mediaLink }}">
+          <source src="{{ mediaLink }}">
           <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
         </video>
       </div>
@@ -658,11 +678,19 @@
       </button>
     </div>
 
-    <!-- MKV Streamer Tip Notice -->
-    <div class="codec-notice">
+    <!-- Format Notice -->
+    <div class="codec-notice" style="display: {{ mkvNoticeDisplay }};">
       <i class="fa-solid fa-circle-info"></i>
       <div>
-        <strong>{{ ext }} JPlayer Streaming:</strong> In-browser EBML demuxing & fMP4 hardware remuxing active. If your video contains cinema multi-channel Dolby (AC3/E-AC3) or DTS audio with no sound in your browser, tap <strong>Play in VLC</strong> or <strong>MX Player</strong> above for 100% audio & subtitle passthrough!
+        <strong>{{ ext }} Video Tip:</strong> If your browser/device does not support playback of this container or its audio track natively, tap <strong>Play in VLC</strong> or <strong>MX Player</strong> above for instant 1-click playback!
+      </div>
+    </div>
+
+    <!-- Codec Error Alert (Shows if browser fails to decode) -->
+    <div id="codec-error-banner" class="codec-error-alert">
+      <i class="fa-solid fa-triangle-exclamation"></i>
+      <div>
+        <strong>Browser Codec Restriction:</strong> Your browser cannot decode this {{ ext }} media format. Please tap <strong>Play in VLC</strong> or <strong>MX Player</strong> above to stream directly with 100% full audio and video hardware decoding!
       </div>
     </div>
 
@@ -673,7 +701,7 @@
         <div class="file-badges">
           <span class="badge"><i class="fa-solid fa-hard-drive"></i> {{ filesize }}</span>
           <span class="badge"><i class="fa-solid fa-file-lines"></i> {{ mimeType }}</span>
-          <span class="badge badge-accent"><i class="fa-solid fa-film"></i> JPlayer v3 Client Demuxer</span>
+          <span class="badge badge-accent"><i class="fa-solid fa-film"></i> JPlayer Cinema Pro</span>
           <span class="badge"><i class="fa-solid fa-gauge-high"></i> RFC 7233 Stream Ready</span>
         </div>
       </div>
@@ -704,8 +732,8 @@
     <span id="toast-text">Link copied to clipboard!</span>
   </div>
 
-  <!-- JPlayer Polyfilled Bundle with Fallback -->
-  <script src="https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.polyfilled.min.js" onerror="this.onerror=null;this.src='/static/jplayer/plyr.polyfilled.min.js';"></script>
+  <!-- JPlayer Built & Verified Bundle -->
+  <script src="/static/jplayer/plyr.polyfilled.min.js"></script>
   
   <script>
     const isMkv = {{ isMkv }};
@@ -729,14 +757,17 @@
       seekTime: 10,
       keyboard: { focused: true, global: true },
       tooltips: { controls: true, seek: true },
-      iconUrl: 'https://cdn.jsdelivr.net/gh/devgamer383/jplayer@main/dist/plyr.svg',
+      iconUrl: '/static/jplayer/plyr.svg',
     });
 
-    // In-Browser Client-Side MKV Streaming via JPlayer
-    if (isMkv && typeof player.loadMkv === 'function') {
-      console.log('JPlayer: Initializing client-side MKV streaming engine for', mediaLink);
-      player.loadMkv(mediaLink).catch(err => {
-        console.warn('JPlayer MKV streamer error:', err);
+    // Detect playback errors (e.g. Unsupported codec on Safari / iOS)
+    if (videoElement) {
+      videoElement.addEventListener('error', function() {
+        console.warn('HTML5 Video Error encountered:', videoElement.error);
+        const errBanner = document.getElementById('codec-error-banner');
+        if (errBanner) {
+          errBanner.style.display = 'flex';
+        }
       });
     }
 
