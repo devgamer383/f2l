@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -20,6 +21,10 @@ import (
 )
 
 func main() {
+	// Configure aggressive memory ceiling for 512MB container dynos to prevent R14 swap
+	debug.SetMemoryLimit(350 * 1024 * 1024) // 350 MB
+	debug.SetGCPercent(50)
+
 	// 1. Structured logging setup
 	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
