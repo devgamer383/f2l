@@ -258,7 +258,7 @@ func (s *Server) handleWebPlayer(w http.ResponseWriter, r *http.Request) {
 	downloadLink := fmt.Sprintf("%s/dl/%s/%s", base, fileIDStr, filename)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+	w.Header().Set("Cache-Control", "private, no-cache, no-store, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 	_ = RenderPlayer(w, PlayerData{
@@ -378,7 +378,7 @@ func (s *Server) handleVirtualWebPlayer(w http.ResponseWriter, r *http.Request) 
 	downloadLink := fmt.Sprintf("%s/dl/v/%s/%s", base, batchIDStr, filename)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+	w.Header().Set("Cache-Control", "private, no-cache, no-store, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 	_ = RenderPlayer(w, PlayerData{
