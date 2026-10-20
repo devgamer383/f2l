@@ -36,19 +36,44 @@ func RenderPlayer(w io.Writer, data PlayerData) error {
 	tmpl = strings.ReplaceAll(tmpl, "{{ isMkv }}", fmt.Sprintf("%t", data.IsMkv))
 	tmpl = strings.ReplaceAll(tmpl, "{{ isAudio }}", fmt.Sprintf("%t", data.IsAudio))
 
+	var mediaContainer string
 	if data.IsAudio {
+		mediaContainer = fmt.Sprintf(`<div id="audio-container">
+        <div class="audio-player-card">
+          <div class="audio-icon-box">
+            <i class="fa-solid fa-music"></i>
+          </div>
+          <audio id="stream-audio" controls preload="metadata" style="width: 100%%; max-width: 600px;">
+            <source src="%s" type="%s">
+            Your browser does not support audio streaming.
+          </audio>
+        </div>
+      </div>`,
+			template.HTMLEscapeString(data.MediaLink),
+			template.HTMLEscapeString(data.MimeType),
+		)
 		tmpl = strings.ReplaceAll(tmpl, "{{ audioDisplay }}", "block")
 		tmpl = strings.ReplaceAll(tmpl, "{{ videoDisplay }}", "none")
 		tmpl = strings.ReplaceAll(tmpl, "{% if isAudio %}", "")
 		tmpl = strings.ReplaceAll(tmpl, "{% else %}", "<!--")
 		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "-->")
 	} else {
+		mediaContainer = fmt.Sprintf(`<div id="video-container">
+        <video id="stream-media" controls playsinline preload="metadata">
+          <source src="%s" type="%s">
+          <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
+        </video>
+      </div>`,
+			template.HTMLEscapeString(data.MediaLink),
+			template.HTMLEscapeString(data.MimeType),
+		)
 		tmpl = strings.ReplaceAll(tmpl, "{{ audioDisplay }}", "none")
 		tmpl = strings.ReplaceAll(tmpl, "{{ videoDisplay }}", "block")
 		tmpl = strings.ReplaceAll(tmpl, "{% if isAudio %}", "<!--")
 		tmpl = strings.ReplaceAll(tmpl, "{% else %}", "-->")
 		tmpl = strings.ReplaceAll(tmpl, "{% endif %}", "")
 	}
+	tmpl = strings.ReplaceAll(tmpl, "{{ mediaContainer }}", mediaContainer)
 
 	if data.IsMkv {
 		tmpl = strings.ReplaceAll(tmpl, "{{ mkvNoticeDisplay }}", "flex")

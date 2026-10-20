@@ -357,8 +357,8 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 		}
 
 		err = s.virtualStream.StreamVirtualRange(r.Context(), w, rawBatchID, start, end, contentLength)
-		if err != nil {
-			slog.Debug("Virtual stream error", "error", err)
+		if err != nil && r.Context().Err() == nil {
+			slog.Error("Virtual stream error", "batch", rawBatchID, "error", err)
 		}
 	}
 }

@@ -551,26 +551,7 @@
 
     <!-- Player Area (Handles MP4, MKV, WebM, Audio) -->
     <main class="player-wrapper">
-      <!-- Audio Container -->
-      <div id="audio-container" style="display: {{ audioDisplay }};">
-        <div class="audio-player-card">
-          <div class="audio-icon-box">
-            <i class="fa-solid fa-music"></i>
-          </div>
-          <audio id="stream-audio" controls preload="auto" src="{{ mediaLink }}" style="width: 100%; max-width: 600px;">
-            <source src="{{ mediaLink }}">
-            Your browser does not support audio streaming.
-          </audio>
-        </div>
-      </div>
-
-      <!-- Video Container -->
-      <div id="video-container" style="display: {{ videoDisplay }};">
-        <video id="stream-media" controls playsinline preload="auto" src="{{ mediaLink }}">
-          <source src="{{ mediaLink }}">
-          <p>Your browser does not support HTML5 video streaming. Use VLC or MX Player.</p>
-        </video>
-      </div>
+      {{ mediaContainer }}
     </main>
 
     <!-- JPlayer Cinema Pro Tools Bar -->
@@ -955,12 +936,17 @@
 
     // 1-Click Launchers
     function openInVLC() {
-      window.location.href = 'vlc://' + mediaLink;
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      if (isAndroid) {
+        window.location.href = 'intent:' + mediaLink + '#Intent;package=org.videolan.vlc;type=video/*;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dorg.videolan.vlc;end';
+      } else {
+        window.location.href = 'vlc://' + mediaLink;
+      }
       showToast('Launching VLC Media Player...');
     }
 
     function openInMXPlayer() {
-      window.location.href = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end';
+      window.location.href = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.mxtech.videoplayer.ad;end';
       showToast('Launching MX Player...');
     }
 

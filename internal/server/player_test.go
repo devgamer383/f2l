@@ -38,4 +38,28 @@ func TestRenderPlayer(t *testing.T) {
 	if !strings.Contains(html, "Smart SDR Tone Mapping") {
 		t.Errorf("Expected Tone Mapping in rendered HTML")
 	}
+	if strings.Contains(html, "id=\"stream-audio\"") {
+		t.Errorf("Expected audio player to NOT be present for video stream")
+	}
+	if !strings.Contains(html, "id=\"stream-media\"") {
+		t.Errorf("Expected video player to be present for video stream")
+	}
+	if strings.Contains(html, "preload=\"auto\"") {
+		t.Errorf("Expected preload=\"metadata\", found preload=\"auto\"")
+	}
+
+	// Test audio rendering
+	dataAudio := data
+	dataAudio.IsAudio = true
+	var bufAudio bytes.Buffer
+	if err := RenderPlayer(&bufAudio, dataAudio); err != nil {
+		t.Fatalf("RenderPlayer audio failed: %v", err)
+	}
+	htmlAudio := bufAudio.String()
+	if !strings.Contains(htmlAudio, "id=\"stream-audio\"") {
+		t.Errorf("Expected audio player to be present for audio stream")
+	}
+	if strings.Contains(htmlAudio, "id=\"stream-media\"") {
+		t.Errorf("Expected video player to NOT be present for audio stream")
+	}
 }
