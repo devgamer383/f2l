@@ -35,3 +35,28 @@ func ParseMarkdown(md string) (string, []tg.MessageEntityClass) {
 	msg, entities := b.Complete()
 	return msg, entities
 }
+
+// CleanURLFilename converts a filename to a clean, human-readable URL slug by
+// replacing spaces with '-' instead of '%20' and converting brackets to avoid Telegram button errors.
+func CleanURLFilename(name string) string {
+	if name == "" {
+		return "file"
+	}
+	s := strings.TrimSpace(name)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "[", "(")
+	s = strings.ReplaceAll(s, "]", ")")
+	s = strings.ReplaceAll(s, "{", "(")
+	s = strings.ReplaceAll(s, "}", ")")
+	s = strings.ReplaceAll(s, `"`, "")
+	s = strings.ReplaceAll(s, `'`, "")
+	s = strings.ReplaceAll(s, `<`, "")
+	s = strings.ReplaceAll(s, `>`, "")
+	s = strings.ReplaceAll(s, "|", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	s = strings.ReplaceAll(s, "/", "-")
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return s
+}

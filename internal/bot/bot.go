@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -261,10 +260,10 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
 	slug := security.EncodeFileSlug(channelMsgID, b.cfg.Telegram.BotToken)
-	safeName := url.PathEscape(props.Name)
-	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, safeName)
-	playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, safeName)
-	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, safeName)
+	cleanName := telegram.CleanURLFilename(props.Name)
+	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, cleanName)
+	playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, cleanName)
+	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, cleanName)
 
 	reply := fmt.Sprintf(
 		"📁 **File Name:** `%s`\n"+
@@ -394,10 +393,10 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
 	batchToken := stream.EncodeBatch(msgIDs)
 	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
-	safeUnifiedName := url.PathEscape(unifiedName)
-	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, safeUnifiedName)
-	playerURL := fmt.Sprintf("%s/v/%s/%s?v=v2", baseURL, slug, safeUnifiedName)
-	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, safeUnifiedName)
+	cleanUnified := telegram.CleanURLFilename(unifiedName)
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, cleanUnified)
+	playerURL := fmt.Sprintf("%s/v/%s/%s?v=v2", baseURL, slug, cleanUnified)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, cleanUnified)
 
 	reply := fmt.Sprintf(
 		"🎬 **Virtual Merge Complete!**\n\n"+
