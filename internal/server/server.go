@@ -168,7 +168,7 @@ func (s *Server) handleFileInfo(w http.ResponseWriter, r *http.Request) {
 		"mime_type":      props.MimeType,
 		"stream_url":     fmt.Sprintf("%s/inline/%s/%s", base, slug, props.Name),
 		"download_url":   fmt.Sprintf("%s/dl/%s/%s", base, slug, props.Name),
-		"web_player_url": fmt.Sprintf("%s/watch/%s/%s", base, slug, props.Name),
+		"web_player_url": fmt.Sprintf("%s/watch/%s/%s?v=v2", base, slug, props.Name),
 	})
 }
 

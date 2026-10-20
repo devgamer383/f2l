@@ -261,7 +261,7 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
 	slug := security.EncodeFileSlug(channelMsgID, b.cfg.Telegram.BotToken)
 	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, props.Name)
-	playerURL := fmt.Sprintf("%s/watch/%s/%s", baseURL, slug, props.Name)
+	playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, props.Name)
 	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, props.Name)
 
 	reply := fmt.Sprintf(
