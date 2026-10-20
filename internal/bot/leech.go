@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,6 +84,14 @@ func sanitizeFilename(name string) string {
 		return "video.mkv"
 	}
 	return cleaned
+}
+
+func joinInts(nums []int) string {
+	var parts []string
+	for _, n := range nums {
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, ",")
 }
 
 type progressWriter struct {
@@ -524,11 +533,11 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							},
 						}
 
-						u := uploader.NewUploader(wClient.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+						u := uploader.NewUploader(wClient.API).WithThreads(12).WithPartSize(512 * 1024).WithProgress(partTracker)
 						inputFile, err := u.FromPath(ctx, partPath)
 						if err != nil {
 							// Fallback to primary
-							u = uploader.NewUploader(primary.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+							u = uploader.NewUploader(primary.API).WithThreads(12).WithPartSize(512 * 1024).WithProgress(partTracker)
 							inputFile, err = u.FromPath(ctx, partPath)
 						}
 						if err != nil {
@@ -536,11 +545,19 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							return
 						}
 
+						// Resolve channel specifically for this worker bot
+						wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, wClient.API)
+						sendClient := wClient
+						if chErr != nil || wCh == nil {
+							wCh = storageChannel
+							sendClient = primary
+						}
+
 						partCap, partEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
-						sRes, err := wClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+						sRes, err := sendClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 							Peer: &tg.InputPeerChannel{
-								ChannelID:  storageChannel.ChannelID,
-								AccessHash: storageChannel.AccessHash,
+								ChannelID:  wCh.ChannelID,
+								AccessHash: wCh.AccessHash,
 							},
 							Media: &tg.InputMediaUploadedDocument{
 								File:     inputFile,
@@ -554,7 +571,26 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							RandomID: randInt64(),
 						})
 						if err != nil {
-							slog.Error("Send slice media failed", "part", partNum, "err", err)
+							slog.Warn("Send slice media with worker failed, falling back to primary bot", "part", partNum, "err", err)
+							sRes, err = primary.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+								Peer: &tg.InputPeerChannel{
+									ChannelID:  storageChannel.ChannelID,
+									AccessHash: storageChannel.AccessHash,
+								},
+								Media: &tg.InputMediaUploadedDocument{
+									File:     inputFile,
+									MimeType: "video/x-matroska",
+									Attributes: []tg.DocumentAttributeClass{
+										&tg.DocumentAttributeFilename{FileName: partFilename},
+									},
+								},
+								Message:  partCap,
+								Entities: partEntities,
+								RandomID: randInt64(),
+							})
+						}
+						if err != nil {
+							slog.Error("Send slice media failed completely", "part", partNum, "err", err)
 							return
 						}
 
@@ -636,10 +672,10 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					},
 				}
 
-				u := uploader.NewUploader(wClient.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+				u := uploader.NewUploader(wClient.API).WithThreads(12).WithPartSize(512 * 1024).WithProgress(partTracker)
 				inputFile, err := u.FromPath(ctx, pPath)
 				if err != nil {
-					u = uploader.NewUploader(primary.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+					u = uploader.NewUploader(primary.API).WithThreads(12).WithPartSize(512 * 1024).WithProgress(partTracker)
 					inputFile, err = u.FromPath(ctx, pPath)
 				}
 				if err != nil {
@@ -647,11 +683,19 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					return
 				}
 
+				// Resolve channel specifically for this worker bot
+				wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, wClient.API)
+				sendClient := wClient
+				if chErr != nil || wCh == nil {
+					wCh = storageChannel
+					sendClient = primary
+				}
+
 				pCap, pEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", pName, pNum, numParts, telegram.FormatBytes(pLen)))
-				sRes, err := wClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				sRes, err := sendClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 					Peer: &tg.InputPeerChannel{
-						ChannelID:  storageChannel.ChannelID,
-						AccessHash: storageChannel.AccessHash,
+						ChannelID:  wCh.ChannelID,
+						AccessHash: wCh.AccessHash,
 					},
 					Media: &tg.InputMediaUploadedDocument{
 						File:     inputFile,
@@ -665,7 +709,26 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					RandomID: randInt64(),
 				})
 				if err != nil {
-					slog.Error("Send stream slice failed", "part", pNum, "err", err)
+					slog.Warn("Send stream slice with worker failed, falling back to primary bot", "part", pNum, "err", err)
+					sRes, err = primary.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+						Peer: &tg.InputPeerChannel{
+							ChannelID:  storageChannel.ChannelID,
+							AccessHash: storageChannel.AccessHash,
+						},
+						Media: &tg.InputMediaUploadedDocument{
+							File:     inputFile,
+							MimeType: "video/x-matroska",
+							Attributes: []tg.DocumentAttributeClass{
+								&tg.DocumentAttributeFilename{FileName: pName},
+							},
+						},
+						Message:  pCap,
+						Entities: pEntities,
+						RandomID: randInt64(),
+					})
+				}
+				if err != nil {
+					slog.Error("Send stream slice failed completely", "part", pNum, "err", err)
 					return
 				}
 
@@ -692,7 +755,56 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		return
 	}
 
-	batchToken := stream.EncodeBatch(validIDs)
+	var batchToken string
+	part1ID := validIDs[0]
+	joinedIDs := joinInts(validIDs)
+
+	if len(validIDs) <= 100 {
+		timelineTag := fmt.Sprintf("[timeline:%s]", joinedIDs)
+		newCap := fmt.Sprintf("📁 `%s`\n📦 `%s` (%d Parts)\n🎬 `%s`", cleanName, telegram.FormatBytes(totalSize), len(validIDs), timelineTag)
+		capText, capEntities := telegram.ParseMarkdown(newCap)
+		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+			Peer: &tg.InputPeerChannel{
+				ChannelID:  storageChannel.ChannelID,
+				AccessHash: storageChannel.AccessHash,
+			},
+			ID:       part1ID,
+			Message:  capText,
+			Entities: capEntities,
+		})
+		if editErr == nil {
+			batchToken = strconv.Itoa(part1ID)
+			slog.Info("Part 1 caption updated with timeline tag", "part1_id", part1ID)
+		} else {
+			slog.Warn("Failed to edit Part 1 caption, falling back to batch token", "err", editErr)
+			batchToken = stream.EncodeBatch(validIDs)
+		}
+	} else {
+		manifestData, _ := json.Marshal(map[string]any{
+			"type":       "v1_manifest",
+			"name":       cleanName,
+			"total_size": totalSize,
+			"parts":      validIDs,
+		})
+		sendRes, sErr := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: &tg.InputPeerChannel{
+				ChannelID:  storageChannel.ChannelID,
+				AccessHash: storageChannel.AccessHash,
+			},
+			Message:  string(manifestData),
+			RandomID: randInt64(),
+		})
+		if sErr == nil {
+			manifestID := extractMsgID(sendRes)
+			if manifestID > 0 {
+				batchToken = strconv.Itoa(manifestID)
+			}
+		}
+		if batchToken == "" {
+			batchToken = stream.EncodeBatch(validIDs)
+		}
+	}
+
 	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
 	cleanUnified := telegram.CleanURLFilename(cleanName)
 	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, cleanUnified)

@@ -26,23 +26,23 @@ func ParseChannelID(rawID int64) int64 {
 }
 
 type ChannelResolver struct {
-	mu           sync.RWMutex
-	rawID        int64
-	channelID    int64
-	inputChannel *tg.InputChannel
+	mu          sync.RWMutex
+	rawID       int64
+	channelID   int64
+	botChannels map[*tg.Client]*tg.InputChannel
 }
 
 func NewChannelResolver(channelID int64) *ChannelResolver {
 	return &ChannelResolver{
-		rawID:     channelID,
-		channelID: ParseChannelID(channelID),
+		rawID:       channelID,
+		channelID:   ParseChannelID(channelID),
+		botChannels: make(map[*tg.Client]*tg.InputChannel),
 	}
 }
 
 func (cr *ChannelResolver) GetInputChannel(ctx context.Context, api *tg.Client) (*tg.InputChannel, error) {
 	cr.mu.RLock()
-	if cr.inputChannel != nil {
-		ch := cr.inputChannel
+	if ch, ok := cr.botChannels[api]; ok && ch != nil {
 		cr.mu.RUnlock()
 		return ch, nil
 	}
@@ -51,13 +51,13 @@ func (cr *ChannelResolver) GetInputChannel(ctx context.Context, api *tg.Client) 
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
-	if cr.inputChannel != nil {
-		return cr.inputChannel, nil
+	if ch, ok := cr.botChannels[api]; ok && ch != nil {
+		return ch, nil
 	}
 
-	slog.Info("Resolving storage channel access hash...", "channel_id", cr.channelID)
+	slog.Info("Resolving storage channel access hash for bot...", "channel_id", cr.channelID)
 
-	// In Telegram MTProto, calling channels.getChannels with access_hash=0 resolves the channel
+	// In Telegram MTProto, calling channels.getChannels with access_hash=0 resolves the channel specifically for this client
 	res, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
 		&tg.InputChannel{
 			ChannelID:  cr.channelID,
@@ -71,12 +71,13 @@ func (cr *ChannelResolver) GetInputChannel(ctx context.Context, api *tg.Client) 
 	chats := res.GetChats()
 	for _, chat := range chats {
 		if ch, ok := chat.(*tg.Channel); ok && ch.ID == cr.channelID {
-			cr.inputChannel = &tg.InputChannel{
+			inputCh := &tg.InputChannel{
 				ChannelID:  ch.ID,
 				AccessHash: ch.AccessHash,
 			}
-			slog.Info("✅ Storage channel resolved successfully", "title", ch.Title, "channel_id", ch.ID)
-			return cr.inputChannel, nil
+			cr.botChannels[api] = inputCh
+			slog.Info("✅ Storage channel resolved successfully for bot", "title", ch.Title, "channel_id", ch.ID)
+			return inputCh, nil
 		}
 	}
 

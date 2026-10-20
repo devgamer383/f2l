@@ -370,7 +370,34 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 	}
 
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
-	batchToken := stream.EncodeBatch(msgIDs)
+	
+	// Hybrid Design: update Part 1 caption with timeline tag
+	var batchToken string
+	part1ID := msgIDs[0]
+	joinedIDs := joinInts(msgIDs)
+
+	if len(msgIDs) <= 100 {
+		timelineTag := fmt.Sprintf("[timeline:%s]", joinedIDs)
+		newCap := fmt.Sprintf("📁 `%s`\n📦 `%s` (%d Parts)\n🎬 `%s`", unifiedName, telegram.FormatBytes(totalSize), len(msgIDs), timelineTag)
+		capText, capEntities := telegram.ParseMarkdown(newCap)
+		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+			Peer: &tg.InputPeerChannel{
+				ChannelID:  storageChannel.ChannelID,
+				AccessHash: storageChannel.AccessHash,
+			},
+			ID:       part1ID,
+			Message:  capText,
+			Entities: capEntities,
+		})
+		if editErr == nil {
+			batchToken = strconv.Itoa(part1ID)
+		} else {
+			batchToken = stream.EncodeBatch(msgIDs)
+		}
+	} else {
+		batchToken = stream.EncodeBatch(msgIDs)
+	}
+
 	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
 	cleanUnified := telegram.CleanURLFilename(unifiedName)
 	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, cleanUnified)
