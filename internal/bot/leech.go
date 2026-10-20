@@ -239,6 +239,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			mimeType = "video/mp4"
 		}
 
+		capText, capEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s`\n📦 `%s`", filename, telegram.FormatBytes(totalSize)))
 		sendRes, err := primary.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  storageChannel.ChannelID,
@@ -251,7 +252,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					&tg.DocumentAttributeFilename{FileName: filename},
 				},
 			},
-			Message:  fmt.Sprintf("📁 `%s`\n📦 `%s`", filename, telegram.FormatBytes(totalSize)),
+			Message:  capText,
+			Entities: capEntities,
 			RandomID: randInt64(),
 		})
 		if err != nil {
@@ -397,6 +399,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							return
 						}
 
+						partCap, partEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
 						sRes, err := wClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 							Peer: &tg.InputPeerChannel{
 								ChannelID:  storageChannel.ChannelID,
@@ -409,7 +412,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 									&tg.DocumentAttributeFilename{FileName: partFilename},
 								},
 							},
-							Message:  fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)),
+							Message:  partCap,
+							Entities: partEntities,
 							RandomID: randInt64(),
 						})
 						if err != nil {
@@ -490,6 +494,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					return
 				}
 
+				pCap, pEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", pName, pNum, numParts, telegram.FormatBytes(pLen)))
 				sRes, err := wClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 					Peer: &tg.InputPeerChannel{
 						ChannelID:  storageChannel.ChannelID,
@@ -502,7 +507,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							&tg.DocumentAttributeFilename{FileName: pName},
 						},
 					},
-					Message:  fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", pName, pNum, numParts, telegram.FormatBytes(pLen)),
+					Message:  pCap,
+					Entities: pEntities,
 					RandomID: randInt64(),
 				})
 				if err != nil {

@@ -418,9 +418,11 @@ func (b *Bot) replyText(ctx context.Context, peer tg.InputPeerClass, replyToID i
 	if primary == nil || !primary.IsReady.Load() {
 		return
 	}
+	cleanMsg, entities := telegram.ParseMarkdown(text)
 	_, _ = primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
-		Message:  text,
+		Message:  cleanMsg,
+		Entities: entities,
 		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
 		RandomID: randInt64(),
 	})
@@ -431,9 +433,11 @@ func (b *Bot) replyWithMarkup(ctx context.Context, peer tg.InputPeerClass, reply
 	if primary == nil || !primary.IsReady.Load() {
 		return
 	}
+	cleanMsg, entities := telegram.ParseMarkdown(text)
 	_, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:        peer,
-		Message:     text,
+		Message:     cleanMsg,
+		Entities:    entities,
 		ReplyTo:     &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
 		RandomID:    randInt64(),
 		ReplyMarkup: markup,
@@ -448,9 +452,11 @@ func (b *Bot) sendReply(ctx context.Context, peer tg.InputPeerClass, replyToID i
 	if primary == nil || !primary.IsReady.Load() {
 		return 0, fmt.Errorf("bot not ready")
 	}
+	cleanMsg, entities := telegram.ParseMarkdown(text)
 	res, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
-		Message:  text,
+		Message:  cleanMsg,
+		Entities: entities,
 		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
 		RandomID: randInt64(),
 	})
@@ -474,10 +480,12 @@ func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int,
 	if primary == nil || !primary.IsReady.Load() || msgID == 0 {
 		return
 	}
+	cleanMsg, entities := telegram.ParseMarkdown(text)
 	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
-		Peer:    peer,
-		ID:      msgID,
-		Message: text,
+		Peer:     peer,
+		ID:       msgID,
+		Message:  cleanMsg,
+		Entities: entities,
 	})
 }
 
@@ -486,10 +494,12 @@ func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, 
 	if primary == nil || !primary.IsReady.Load() || msgID == 0 {
 		return
 	}
+	cleanMsg, entities := telegram.ParseMarkdown(text)
 	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 		Peer:        peer,
 		ID:          msgID,
-		Message:     text,
+		Message:     cleanMsg,
+		Entities:    entities,
 		ReplyMarkup: markup,
 	})
 }
