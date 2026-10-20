@@ -1,0 +1,382 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+
+	"f2l/internal/config"
+	"f2l/internal/stream"
+	"f2l/internal/telegram"
+
+	"github.com/gotd/td/tg"
+)
+
+type Bot struct {
+	cfg           *config.Config
+	pool          *telegram.BotPool
+	virtualStream *stream.VirtualStreamEngine
+	dispatcher    tg.UpdateDispatcher
+}
+
+func NewBot(cfg *config.Config, pool *telegram.BotPool, virtualStream *stream.VirtualStreamEngine) *Bot {
+	b := &Bot{
+		cfg:           cfg,
+		pool:          pool,
+		virtualStream: virtualStream,
+		dispatcher:    tg.NewUpdateDispatcher(),
+	}
+
+	b.registerHandlers()
+	return b
+}
+
+func (b *Bot) Dispatcher() tg.UpdateDispatcher {
+	return b.dispatcher
+}
+
+func (b *Bot) isUserAllowed(userID int64) bool {
+	if b.cfg.Telegram.OwnerID != 0 && userID == b.cfg.Telegram.OwnerID {
+		return true
+	}
+	if len(b.cfg.Telegram.AllowedUserIDs) == 0 {
+		return true // public mode if not specified
+	}
+	for _, id := range b.cfg.Telegram.AllowedUserIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bot) registerHandlers() {
+	b.dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
+		msg, ok := u.Message.(*tg.Message)
+		if !ok || msg.Out {
+			return nil
+		}
+
+		peerUser, ok := msg.PeerID.(*tg.PeerUser)
+		if !ok {
+			return nil // only handle private chats
+		}
+
+		user, ok := e.Users[peerUser.UserID]
+		if !ok {
+			return nil
+		}
+		userPeer := user.AsInputPeer()
+
+		if !b.isUserAllowed(peerUser.UserID) {
+			b.replyText(ctx, userPeer, msg.ID, "⛔ **Access Denied:** You are not authorized to use this bot.")
+			return nil
+		}
+
+		text := strings.TrimSpace(msg.Message)
+
+		// 1. Check commands
+		if strings.HasPrefix(text, "/") {
+			parts := strings.Fields(text)
+			cmd := strings.ToLower(parts[0])
+			cmd = strings.TrimSuffix(cmd, "@"+strings.ToLower(b.cfg.Telegram.BotUsername))
+
+			switch cmd {
+			case "/start":
+				b.handleStart(ctx, userPeer, msg.ID, user.FirstName)
+				return nil
+			case "/help":
+				b.handleHelp(ctx, userPeer, msg.ID)
+				return nil
+			case "/merge", "/stitch", "/join":
+				replyTargetID := 0
+				if rh, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
+					replyTargetID = rh.ReplyToMsgID
+				}
+				b.handleMerge(ctx, userPeer, msg.ID, replyTargetID, parts[1:])
+				return nil
+			case "/leech", "/download", "/fetch":
+				go b.handleLeech(ctx, userPeer, msg.ID, parts[1:])
+				return nil
+			}
+		}
+
+		// 2. Check incoming media files (user sent or forwarded a file)
+		if msg.Media != nil {
+			go b.handleIncomingMedia(ctx, userPeer, msg)
+			return nil
+		}
+
+		return nil
+	})
+}
+
+func (b *Bot) handleStart(ctx context.Context, peer tg.InputPeerClass, replyToID int, firstName string) {
+	text := fmt.Sprintf(
+		"👋 **Hello, %s!**\n\n"+
+			"🚀 **High-Speed Telegram Stream & Leech Engine (Go 2.0)**\n\n"+
+			"⚡ **Features:**\n"+
+			"• Instant direct streaming links for any file\n"+
+			"• High-speed RFC 7233 byte-range seeking for VLC & Web Players\n"+
+			"• Stateless 10GB+ virtual multi-part merging (`/merge`)\n"+
+			"• Cloud Leeching engine with multi-bot parallel uploads (`/leech`)\n\n"+
+			"Send or forward me any video, document, or audio file to get instant streaming links!",
+		firstName,
+	)
+	b.replyText(ctx, peer, replyToID, text)
+}
+
+func (b *Bot) handleHelp(ctx context.Context, peer tg.InputPeerClass, replyToID int) {
+	text := "ℹ️ **Available Commands:**\n\n" +
+		"• `/leech <url> [name.mkv]` - Leech any direct link (splits >2GB into virtual 10GB+ link)\n" +
+		"• `/merge <count>` - Reply to part 1 to merge split 2GB parts into 1 stream\n" +
+		"• `/help` - Show this help message"
+	b.replyText(ctx, peer, replyToID, text)
+}
+
+func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, msg *tg.Message) {
+	props, err := telegram.GetFileProperties(msg)
+	if err != nil {
+		return // Unsupported media type
+	}
+
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return
+	}
+
+	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
+	if err != nil {
+		slog.Error("Storage channel error", "error", err)
+		return
+	}
+
+	// Forward / copy message to storage channel
+	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+		FromPeer: peer,
+		ToPeer: &tg.InputPeerChannel{
+			ChannelID:  storageChannel.ChannelID,
+			AccessHash: storageChannel.AccessHash,
+		},
+		ID:       []int{msg.ID},
+		RandomID: []int64{randInt64()},
+	})
+	if err != nil {
+		slog.Error("Forward to storage channel failed", "error", err)
+		return
+	}
+
+	channelMsgID := 0
+	if updates, ok := fwdRes.(*tg.Updates); ok {
+		for _, upd := range updates.Updates {
+			if nu, ok := upd.(*tg.UpdateNewChannelMessage); ok {
+				if m, ok := nu.Message.(*tg.Message); ok {
+					channelMsgID = m.ID
+					break
+				}
+			}
+		}
+	}
+
+	if channelMsgID == 0 {
+		return
+	}
+
+	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
+	streamURL := fmt.Sprintf("%s/inline/%d/%s", baseURL, channelMsgID, props.Name)
+	playerURL := fmt.Sprintf("%s/stream/%d/%s", baseURL, channelMsgID, props.Name)
+	downloadURL := fmt.Sprintf("%s/dl/%d/%s", baseURL, channelMsgID, props.Name)
+
+	reply := fmt.Sprintf(
+		"📁 **File Name:** `%s`\n"+
+			"📦 **File Size:** `%s`\n"+
+			"⚡ **Stream Protocol:** `RFC 7233 (Zero-Copy Go)`\n\n"+
+			"🔗 **Direct Links:**\n"+
+			"• **Direct Stream:** [Click Here](%s)\n"+
+			"• **Web & VLC Player:** [Click Here](%s)\n"+
+			"• **Fast Download:** [Click Here](%s)",
+		props.Name, telegram.FormatBytes(props.Size), streamURL, playerURL, downloadURL,
+	)
+
+	b.replyText(ctx, peer, msg.ID, reply)
+}
+
+func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID int, targetMsgID int, args []string) {
+	if len(args) == 0 {
+		b.replyText(ctx, peer, replyToID, "❌ **Usage:** Reply to part 1 with `/merge <total_parts>` (e.g. `/merge 5`)")
+		return
+	}
+
+	count, err := strconv.Atoi(args[0])
+	if err != nil || count < 2 || count > 50 {
+		b.replyText(ctx, peer, replyToID, "❌ Count must be a valid number between 2 and 50.")
+		return
+	}
+
+	if targetMsgID == 0 {
+		b.replyText(ctx, peer, replyToID, "❌ Please reply to the first file part.")
+		return
+	}
+
+	primary := b.pool.Primary()
+	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
+	if err != nil {
+		b.replyText(ctx, peer, replyToID, "❌ Storage channel error.")
+		return
+	}
+
+	// Forward replied message to storage channel to get channel message ID
+	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+		FromPeer: peer,
+		ToPeer: &tg.InputPeerChannel{
+			ChannelID:  storageChannel.ChannelID,
+			AccessHash: storageChannel.AccessHash,
+		},
+		ID:       []int{targetMsgID},
+		RandomID: []int64{randInt64()},
+	})
+	if err != nil {
+		b.replyText(ctx, peer, replyToID, "❌ Could not process replied message.")
+		return
+	}
+
+	startID := 0
+	if updates, ok := fwdRes.(*tg.Updates); ok {
+		for _, upd := range updates.Updates {
+			if nu, ok := upd.(*tg.UpdateNewChannelMessage); ok {
+				if m, ok := nu.Message.(*tg.Message); ok {
+					startID = m.ID
+					break
+				}
+			}
+		}
+	}
+
+	if startID == 0 {
+		b.replyText(ctx, peer, replyToID, "❌ Could not resolve start message ID in channel.")
+		return
+	}
+
+	// Verify all parts exist
+	msgIDs := make([]int, count)
+	var inputMsgs []tg.InputMessageClass
+	for i := 0; i < count; i++ {
+		msgIDs[i] = startID + i
+		inputMsgs = append(inputMsgs, &tg.InputMessageID{ID: startID + i})
+	}
+
+	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+		Channel: storageChannel,
+		ID:      inputMsgs,
+	})
+	if err != nil {
+		b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Error verifying parts: %s", err))
+		return
+	}
+
+	modified, ok := res.AsModified()
+	if !ok {
+		b.replyText(ctx, peer, replyToID, "❌ Could not retrieve messages from storage channel.")
+		return
+	}
+
+	messages := modified.GetMessages()
+	if len(messages) < count {
+		b.replyText(ctx, peer, replyToID, "❌ Some parts were missing in the storage channel.")
+		return
+	}
+
+	var totalSize int64 = 0
+	unifiedName := ""
+
+	for idx, m := range messages {
+		msg, ok := m.(*tg.Message)
+		if !ok {
+			b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Part %d is not a valid message.", idx+1))
+			return
+		}
+		props, err := telegram.GetFileProperties(msg)
+		if err != nil {
+			b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Part %d has no valid media file.", idx+1))
+			return
+		}
+		if idx == 0 {
+			unifiedName = stream.CleanVirtualName(props.Name)
+		}
+		totalSize += props.Size
+	}
+
+	batchToken := stream.EncodeBatch(msgIDs)
+	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, batchToken, unifiedName)
+	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, batchToken, unifiedName)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, batchToken, unifiedName)
+
+	text := fmt.Sprintf(
+		"🎬 **Virtual Multi-Part Stream Created! (Go)**\n\n"+
+			"📁 **Merged Name:** `%s`\n"+
+			"📦 **Total Size:** `%s` (%d Parts)\n"+
+			"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching (Stateless)`\n\n"+
+			"🔗 **Single Seamless Links:**\n"+
+			"• **Direct Stream:** [Click Here](%s)\n"+
+			"• **Web & VLC Player:** [Click Here](%s)\n"+
+			"• **Single 10GB Download:** [Click Here](%s)\n\n"+
+			"💡 _All %d parts stream and seek seamlessly as one continuous 10GB+ file without any database!_",
+		unifiedName, telegram.FormatBytes(totalSize), count, streamURL, playerURL, downloadURL, count,
+	)
+
+	b.replyText(ctx, peer, replyToID, text)
+}
+
+func (b *Bot) replyText(ctx context.Context, peer tg.InputPeerClass, replyToID int, text string) {
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return
+	}
+	_, _ = primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		Message:  text,
+		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
+		RandomID: randInt64(),
+	})
+}
+
+func (b *Bot) sendReply(ctx context.Context, peer tg.InputPeerClass, replyToID int, text string) (int, error) {
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return 0, fmt.Errorf("bot not ready")
+	}
+	res, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		Message:  text,
+		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
+		RandomID: randInt64(),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if updates, ok := res.(*tg.Updates); ok {
+		for _, upd := range updates.Updates {
+			if nu, ok := upd.(*tg.UpdateNewMessage); ok {
+				if m, ok := nu.Message.(*tg.Message); ok {
+					return m.ID, nil
+				}
+			}
+		}
+	}
+	return 0, nil
+}
+
+func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int, text string) {
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() || msgID == 0 {
+		return
+	}
+	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		Peer:    peer,
+		ID:      msgID,
+		Message: text,
+	})
+}

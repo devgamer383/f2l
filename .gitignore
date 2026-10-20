@@ -7,3 +7,6 @@ __pycache__/
 event-log.txt
 .DS_Store
 *.log
+bin/
+data/
+downloads/

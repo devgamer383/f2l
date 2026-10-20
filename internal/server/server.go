@@ -1,0 +1,418 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"f2l/internal/cache"
+	"f2l/internal/config"
+	"f2l/internal/stream"
+	"f2l/internal/telegram"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+)
+
+var rangeHeaderRe = regexp.MustCompile(`^bytes=(\d*)-(\d*)$`)
+
+type Server struct {
+	cfg            *config.Config
+	cache          *cache.LRUCache
+	fastStreamer   *stream.FastStreamEngine
+	virtualStream  *stream.VirtualStreamEngine
+	router         *chi.Mux
+}
+
+func NewServer(
+	cfg *config.Config,
+	chunkCache *cache.LRUCache,
+	fastStreamer *stream.FastStreamEngine,
+	virtualStream *stream.VirtualStreamEngine,
+) *Server {
+	s := &Server{
+		cfg:           cfg,
+		cache:         chunkCache,
+		fastStreamer:  fastStreamer,
+		virtualStream: virtualStream,
+		router:        chi.NewRouter(),
+	}
+
+	s.setupRoutes()
+	return s
+}
+
+func (s *Server) Router() http.Handler {
+	return s.router
+}
+
+func (s *Server) getBaseURL(r *http.Request) string {
+	if s.cfg.Server.BaseURL != "" {
+		return strings.TrimRight(s.cfg.Server.BaseURL, "/")
+	}
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
+}
+
+func (s *Server) setupRoutes() {
+	r := s.router
+
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.RealIP)
+	r.Use(corsMiddleware)
+
+	// Health Check / Ping
+	r.Get("/health", s.handleHealth)
+	r.Get("/ping", s.handleHealth)
+
+	// Home redirect to bot
+	r.Get("/", s.handleHome)
+
+	// Single-File Endpoints
+	r.Get("/info/{file_id}", s.handleFileInfo)
+	r.Method("HEAD", "/dl/{file_id}/{filename}", http.HandlerFunc(s.handleMediaTransmission(false)))
+	r.Get("/dl/{file_id}/{filename}", s.handleMediaTransmission(false))
+
+	r.Method("HEAD", "/inline/{file_id}/{filename}", http.HandlerFunc(s.handleMediaTransmission(true)))
+	r.Get("/inline/{file_id}/{filename}", s.handleMediaTransmission(true))
+	r.Method("HEAD", "/play/{file_id}/{filename}", http.HandlerFunc(s.handleMediaTransmission(true)))
+	r.Get("/play/{file_id}/{filename}", s.handleMediaTransmission(true))
+
+	r.Get("/stream/{file_id}/{filename}", s.handleWebPlayer)
+	r.Get("/watch/{file_id}/{filename}", s.handleWebPlayer)
+
+	// Virtual Multi-Part 10GB+ Endpoints
+	r.Get("/info/v/{batch_id}", s.handleVirtualFileInfo)
+	r.Method("HEAD", "/dl/v/{batch_id}/{filename}", http.HandlerFunc(s.handleVirtualTransmission(false)))
+	r.Get("/dl/v/{batch_id}/{filename}", s.handleVirtualTransmission(false))
+
+	r.Method("HEAD", "/inline/v/{batch_id}/{filename}", http.HandlerFunc(s.handleVirtualTransmission(true)))
+	r.Get("/inline/v/{batch_id}/{filename}", s.handleVirtualTransmission(true))
+	r.Method("HEAD", "/play/v/{batch_id}/{filename}", http.HandlerFunc(s.handleVirtualTransmission(true)))
+	r.Get("/play/v/{batch_id}/{filename}", s.handleVirtualTransmission(true))
+
+	r.Get("/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
+	r.Get("/stream/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Telegram.BotUsername != "" {
+		http.Redirect(w, r, "https://t.me/"+s.cfg.Telegram.BotUsername, http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"service": "FileStreamBot-Go",
+		"status":  "running",
+		"version": s.cfg.Server.Version,
+	})
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "healthy",
+		"version": s.cfg.Server.Version,
+		"cache":   s.cache.GetStats(),
+	})
+}
+
+func (s *Server) handleFileInfo(w http.ResponseWriter, r *http.Request) {
+	fileIDStr := chi.URLParam(r, "file_id")
+	fileID, err := strconv.Atoi(fileIDStr)
+	if err != nil {
+		http.Error(w, "Invalid file ID", http.StatusBadRequest)
+		return
+	}
+
+	props, err := s.fastStreamer.GetFileProperties(r.Context(), fileID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	base := s.getBaseURL(r)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"file_id":        fileID,
+		"filename":       props.Name,
+		"size_bytes":     props.Size,
+		"size_formatted": telegram.FormatBytes(props.Size),
+		"mime_type":      props.MimeType,
+		"stream_url":     fmt.Sprintf("%s/inline/%d/%s", base, fileID, props.Name),
+		"download_url":   fmt.Sprintf("%s/dl/%d/%s", base, fileID, props.Name),
+		"web_player_url": fmt.Sprintf("%s/stream/%d/%s", base, fileID, props.Name),
+	})
+}
+
+func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fileIDStr := chi.URLParam(r, "file_id")
+		fileID, err := strconv.Atoi(fileIDStr)
+		if err != nil {
+			http.Error(w, "Invalid file ID", http.StatusBadRequest)
+			return
+		}
+
+		filename := chi.URLParam(r, "filename")
+
+		props, err := s.fastStreamer.GetFileProperties(r.Context(), fileID)
+		if err != nil {
+			http.Error(w, "File not found: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		if filename == "" {
+			filename = props.Name
+		}
+
+		disposition := "attachment"
+		if isInline {
+			disposition = "inline"
+		}
+
+		fileSize := props.Size
+		w.Header().Set("Content-Type", props.MimeType)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+		if r.Method == "HEAD" {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		start, end, statusCode, err := parseRange(r.Header.Get("Range"), fileSize)
+		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+			http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+
+		contentLength := end - start + 1
+		if statusCode == http.StatusPartialContent {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+			w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+			w.WriteHeader(http.StatusOK)
+		}
+
+		err = s.fastStreamer.StreamFileRange(r.Context(), w, fileID, start, end, contentLength, props)
+		if err != nil {
+			slog.Debug("Stream error or client disconnected", "error", err)
+		}
+	}
+}
+
+func (s *Server) handleWebPlayer(w http.ResponseWriter, r *http.Request) {
+	fileIDStr := chi.URLParam(r, "file_id")
+	fileID, err := strconv.Atoi(fileIDStr)
+	if err != nil {
+		http.Error(w, "Invalid file ID", http.StatusBadRequest)
+		return
+	}
+
+	filename := chi.URLParam(r, "filename")
+	props, err := s.fastStreamer.GetFileProperties(r.Context(), fileID)
+	if err != nil {
+		http.Error(w, "File not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	if filename == "" {
+		filename = props.Name
+	}
+
+	base := s.getBaseURL(r)
+	mediaLink := fmt.Sprintf("%s/inline/%d/%s", base, fileID, filename)
+	downloadLink := fmt.Sprintf("%s/dl/%d/%s", base, fileID, filename)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = RenderPlayer(w, PlayerData{
+		Filename:     filename,
+		Filesize:     telegram.FormatBytes(props.Size),
+		MimeType:     props.MimeType,
+		MediaLink:    mediaLink,
+		DownloadLink: downloadLink,
+		IsAudio:      strings.HasPrefix(props.MimeType, "audio/"),
+		IsMkv:        IsMkv(filename, props.MimeType),
+		Ext:          filepath.Ext(filename),
+		Version:      s.cfg.Server.Version,
+	})
+}
+
+// Virtual Multi-Part Handlers
+func (s *Server) handleVirtualFileInfo(w http.ResponseWriter, r *http.Request) {
+	batchID := chi.URLParam(r, "batch_id")
+	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	base := s.getBaseURL(r)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"batch_id":         batchID,
+		"filename":         meta.Filename,
+		"total_size_bytes": meta.TotalSize,
+		"size_formatted":   telegram.FormatBytes(meta.TotalSize),
+		"mime_type":        meta.MimeType,
+		"parts_count":      len(meta.Parts),
+		"stream_url":       fmt.Sprintf("%s/inline/v/%s/%s", base, batchID, meta.Filename),
+		"download_url":     fmt.Sprintf("%s/dl/v/%s/%s", base, batchID, meta.Filename),
+		"web_player_url":   fmt.Sprintf("%s/v/%s/%s", base, batchID, meta.Filename),
+	})
+}
+
+func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		batchID := chi.URLParam(r, "batch_id")
+		filename := chi.URLParam(r, "filename")
+
+		meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+		if err != nil {
+			http.Error(w, "Virtual batch not found: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		if filename == "" {
+			filename = meta.Filename
+		}
+
+		disposition := "attachment"
+		if isInline {
+			disposition = "inline"
+		}
+
+		fileSize := meta.TotalSize
+		w.Header().Set("Content-Type", meta.MimeType)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+		if r.Method == "HEAD" {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		start, end, statusCode, err := parseRange(r.Header.Get("Range"), fileSize)
+		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+			http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+
+		contentLength := end - start + 1
+		if statusCode == http.StatusPartialContent {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+			w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+			w.WriteHeader(http.StatusOK)
+		}
+
+		err = s.virtualStream.StreamVirtualRange(r.Context(), w, batchID, start, end, contentLength)
+		if err != nil {
+			slog.Debug("Virtual stream error", "error", err)
+		}
+	}
+}
+
+func (s *Server) handleVirtualWebPlayer(w http.ResponseWriter, r *http.Request) {
+	batchID := chi.URLParam(r, "batch_id")
+	filename := chi.URLParam(r, "filename")
+
+	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+	if err != nil {
+		http.Error(w, "Virtual batch not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	if filename == "" {
+		filename = meta.Filename
+	}
+
+	base := s.getBaseURL(r)
+	mediaLink := fmt.Sprintf("%s/inline/v/%s/%s", base, batchID, filename)
+	downloadLink := fmt.Sprintf("%s/dl/v/%s/%s", base, batchID, filename)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = RenderPlayer(w, PlayerData{
+		Filename:     filename,
+		Filesize:     telegram.FormatBytes(meta.TotalSize),
+		MimeType:     meta.MimeType,
+		MediaLink:    mediaLink,
+		DownloadLink: downloadLink,
+		IsAudio:      strings.HasPrefix(meta.MimeType, "audio/"),
+		IsMkv:        IsMkv(filename, meta.MimeType),
+		Ext:          filepath.Ext(filename),
+		Version:      s.cfg.Server.Version,
+	})
+}
+
+func parseRange(rangeHdr string, fileSize int64) (start, end int64, status int, err error) {
+	if rangeHdr == "" {
+		return 0, fileSize - 1, http.StatusOK, nil
+	}
+
+	m := rangeHeaderRe.FindStringSubmatch(strings.TrimSpace(rangeHdr))
+	if len(m) != 3 {
+		return 0, 0, 0, fmt.Errorf("invalid range header format")
+	}
+
+	startStr, endStr := m[1], m[2]
+	if startStr != "" && endStr != "" {
+		start, _ = strconv.ParseInt(startStr, 10, 64)
+		end, _ = strconv.ParseInt(endStr, 10, 64)
+	} else if startStr != "" {
+		start, _ = strconv.ParseInt(startStr, 10, 64)
+		end = fileSize - 1
+	} else if endStr != "" {
+		suffixLen, _ := strconv.ParseInt(endStr, 10, 64)
+		start = fileSize - suffixLen
+		if start < 0 {
+			start = 0
+		}
+		end = fileSize - 1
+	} else {
+		return 0, 0, 0, fmt.Errorf("empty range bounds")
+	}
+
+	if start > end || start >= fileSize {
+		return 0, 0, 0, fmt.Errorf("range not satisfiable")
+	}
+
+	if end >= fileSize {
+		end = fileSize - 1
+	}
+
+	return start, end, http.StatusPartialContent, nil
+}
