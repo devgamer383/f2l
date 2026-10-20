@@ -30,11 +30,19 @@ import (
 )
 
 const (
-	// Safe 1900 MiB slice size strictly below Telegram's 2000 MiB ceiling
-	PartSize int64 = 1900 * 1024 * 1024
-	DownDir        = "downloads"
-	UserAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	DownDir   = "downloads"
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
+
+func getLeechPartSize() int64 {
+	if env := os.Getenv("LEECH_PART_SIZE_MB"); env != "" {
+		if mb, err := strconv.Atoi(env); err == nil && mb >= 200 && mb <= 1950 {
+			return int64(mb) * 1024 * 1024
+		}
+	}
+	// Default safe 1400 MiB slice: fits comfortably on 2GB disks with 600MB+ free space
+	return 1400 * 1024 * 1024
+}
 
 var cdRegex = regexp.MustCompile(`(?i)filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)`)
 
@@ -231,11 +239,12 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		numBots = 1
 	}
 
+	maxPartSize := getLeechPartSize()
 	var numParts int
-	if totalSize <= PartSize {
+	if totalSize <= maxPartSize {
 		numParts = 1
 	} else {
-		numParts = int(math.Ceil(float64(totalSize) / float64(PartSize)))
+		numParts = int(math.Ceil(float64(totalSize) / float64(maxPartSize)))
 	}
 
 	sliceSize := int64(math.Ceil(float64(totalSize) / float64(numParts)))
