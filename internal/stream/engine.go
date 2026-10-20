@@ -180,114 +180,158 @@ func (e *FastStreamEngine) StreamFileRange(
 	invoker := e.getInvokerForDC(ctx, props.DCID)
 	api := tg.NewClient(invoker)
 
-	// Sliding-window prefetch pipeline
-	chunkChan := make(chan chunkItem, e.prefetch)
+	// Determine worker concurrency for parallel chunk download
+	concurrency := 4
+	if e.prefetch > concurrency {
+		concurrency = e.prefetch
+	}
+	if chunksToStream < concurrency {
+		concurrency = chunksToStream
+	}
 
-	// Background prefetch producer
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+
+	taskChan := make(chan int, chunksToStream)
+	resultChan := make(chan chunkItem, e.prefetch*2)
+
+	for i := 0; i < chunksToStream; i++ {
+		taskChan <- i
+	}
+	close(taskChan)
+
+	var wg sync.WaitGroup
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range taskChan {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
+
+				curOffsetChunk := offsetChunk + int64(idx)
+				curCacheKey := fmt.Sprintf("%d_%d", fileID, curOffsetChunk)
+
+				// Fast path: In-memory cache hit
+				if cached, ok := e.chunkMem.Get(curCacheKey); ok {
+					select {
+					case resultChan <- chunkItem{index: idx, data: cached}:
+					case <-workerCtx.Done():
+					}
+					continue
+				}
+
+				// Network fetch
+				chunkOffsetBytes := curOffsetChunk * chunkSize
+				req := &tg.UploadGetFileRequest{
+					Location: props.Location,
+					Offset:   chunkOffsetBytes,
+					Limit:    int(chunkSize),
+					Precise:  true,
+				}
+
+				res, err := api.UploadGetFile(workerCtx, req)
+				if err != nil {
+					select {
+					case resultChan <- chunkItem{index: idx, err: err}:
+					case <-workerCtx.Done():
+					}
+					return
+				}
+
+				var chunkBytes []byte
+				switch v := res.(type) {
+				case *tg.UploadFile:
+					chunkBytes = v.Bytes
+				case *tg.UploadFileCDNRedirect:
+					select {
+					case resultChan <- chunkItem{index: idx, err: fmt.Errorf("CDN redirect not supported")}:
+					case <-workerCtx.Done():
+					}
+					return
+				default:
+					select {
+					case resultChan <- chunkItem{index: idx, err: fmt.Errorf("unexpected UploadFile response type")}:
+					case <-workerCtx.Done():
+					}
+					return
+				}
+
+				// Store in LRU cache
+				e.chunkMem.Set(curCacheKey, chunkBytes)
+
+				select {
+				case resultChan <- chunkItem{index: idx, data: chunkBytes}:
+				case <-workerCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Close resultChan when all workers finish
 	go func() {
-		defer close(chunkChan)
-
-		for i := 0; i < chunksToStream; i++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			curOffsetChunk := offsetChunk + int64(i)
-			chunkOffsetBytes := curOffsetChunk * chunkSize
-
-			req := &tg.UploadGetFileRequest{
-				Location: props.Location,
-				Offset:   chunkOffsetBytes,
-				Limit:    int(chunkSize),
-				Precise:  true,
-			}
-
-			res, err := api.UploadGetFile(ctx, req)
-			if err != nil {
-				select {
-				case chunkChan <- chunkItem{index: i, err: err}:
-				case <-ctx.Done():
-				}
-				return
-			}
-
-			var chunkBytes []byte
-			switch v := res.(type) {
-			case *tg.UploadFile:
-				chunkBytes = v.Bytes
-			case *tg.UploadFileCDNRedirect:
-				select {
-				case chunkChan <- chunkItem{index: i, err: fmt.Errorf("CDN redirect not supported")}:
-				case <-ctx.Done():
-				}
-				return
-			default:
-				select {
-				case chunkChan <- chunkItem{index: i, err: fmt.Errorf("unexpected UploadFile response type")}:
-				case <-ctx.Done():
-				}
-				return
-			}
-
-			select {
-			case chunkChan <- chunkItem{index: i, data: chunkBytes}:
-			case <-ctx.Done():
-				return
-			}
-		}
+		wg.Wait()
+		close(resultChan)
 	}()
 
 	var bytesStreamed int64 = 0
-	chunkIdx := 0
-
+	expectedIdx := 0
 	flusher, hasFlusher := w.(http.Flusher)
+	pendingChunks := make(map[int][]byte)
 
-	for item := range chunkChan {
+	for {
+		if expectedIdx >= chunksToStream || bytesStreamed >= contentLength {
+			break
+		}
+
+		// Check if next in-order chunk is already available in pending buffer
+		if chunk, exists := pendingChunks[expectedIdx]; exists {
+			delete(pendingChunks, expectedIdx)
+
+			if expectedIdx == 0 {
+				trimStart := startByte % chunkSize
+				if trimStart > 0 && trimStart < int64(len(chunk)) {
+					chunk = chunk[trimStart:]
+				}
+			}
+
+			remaining := contentLength - bytesStreamed
+			if remaining <= 0 {
+				break
+			}
+			if int64(len(chunk)) > remaining {
+				chunk = chunk[:remaining]
+			}
+
+			if len(chunk) > 0 {
+				n, err := w.Write(chunk)
+				if err != nil {
+					return err // Client closed the connection
+				}
+				bytesStreamed += int64(n)
+				if hasFlusher {
+					flusher.Flush()
+				}
+			}
+
+			expectedIdx++
+			continue
+		}
+
+		// Wait for next result from parallel workers
+		item, ok := <-resultChan
+		if !ok {
+			break // No more items
+		}
 		if item.err != nil {
 			return item.err
 		}
 
-		chunk := item.data
-
-		// Cache initial chunk or single probes in memory for instant seeking
-		curChunkPos := offsetChunk + int64(chunkIdx)
-		if curChunkPos == 0 || chunksToStream == 1 {
-			e.chunkMem.Set(fmt.Sprintf("%d_%d", fileID, curChunkPos), chunk)
-		}
-
-		// Trim start of first chunk if request begins in the middle of a boundary
-		if chunkIdx == 0 {
-			trimStart := startByte % chunkSize
-			if trimStart > 0 && trimStart < int64(len(chunk)) {
-				chunk = chunk[trimStart:]
-			}
-		}
-
-		remaining := contentLength - bytesStreamed
-		if remaining <= 0 {
-			break
-		}
-
-		// Trim end of last chunk
-		if int64(len(chunk)) > remaining {
-			chunk = chunk[:remaining]
-		}
-
-		if len(chunk) > 0 {
-			n, err := w.Write(chunk)
-			if err != nil {
-				return err // Client closed the connection
-			}
-			bytesStreamed += int64(n)
-
-			if hasFlusher {
-				flusher.Flush()
-			}
-		}
-
-		chunkIdx++
+		pendingChunks[item.index] = item.data
 	}
 
 	return nil
