@@ -275,7 +275,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 		slug := security.EncodeFileSlug(sentMsgID, b.cfg.Telegram.BotToken)
 		streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, filename)
-		playerURL := fmt.Sprintf("%s/stream/%s/%s", baseURL, slug, filename)
+		playerURL := fmt.Sprintf("%s/watch/%s/%s", baseURL, slug, filename)
 		downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, filename)
 
 		successText := fmt.Sprintf(
