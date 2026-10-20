@@ -9,7 +9,7 @@ RUN go mod download
 
 # Build application
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/bin/bot ./cmd/bot
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/bin/bot .
 
 # Final Minimal Stage
 FROM alpine:3.19
