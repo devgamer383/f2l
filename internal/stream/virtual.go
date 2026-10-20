@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -19,6 +20,7 @@ var (
 	sanitizerRegex  = regexp.MustCompile(`[\\/*?:"<>|]`)
 	consecBatchRe   = regexp.MustCompile(`^s(\d+)c(\d+)$`)
 	rangeBatchRe    = regexp.MustCompile(`^(\d+)-(\d+)$`)
+	timelineTagRe   = regexp.MustCompile(`(?i)\[(?:timeline|batch):([0-9,\s]+)\]`)
 )
 
 func CleanVirtualName(raw string) string {
@@ -145,28 +147,84 @@ func (v *VirtualStreamEngine) GetVirtualMetadata(ctx context.Context, batchToken
 		return nil, fmt.Errorf("resolve storage channel: %w", err)
 	}
 
-	var inputMsgs []tg.InputMessageClass
-	for _, id := range msgIDs {
-		inputMsgs = append(inputMsgs, &tg.InputMessageID{ID: id})
+	fetchMessages := func(ids []int) (map[int]*tg.Message, error) {
+		result := make(map[int]*tg.Message)
+		for i := 0; i < len(ids); i += 100 {
+			end := i + 100
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[i:end]
+			var inputMsgs []tg.InputMessageClass
+			for _, id := range chunk {
+				inputMsgs = append(inputMsgs, &tg.InputMessageID{ID: id})
+			}
+			res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: ch,
+				ID:      inputMsgs,
+			})
+			if err != nil {
+				return nil, err
+			}
+			modified, ok := res.AsModified()
+			if !ok {
+				continue
+			}
+			for _, m := range modified.GetMessages() {
+				if msg, ok := m.(*tg.Message); ok {
+					result[msg.ID] = msg
+				}
+			}
+		}
+		return result, nil
 	}
 
-	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-		Channel: ch,
-		ID:      inputMsgs,
-	})
+	msgMap, err := fetchMessages(msgIDs)
 	if err != nil {
 		return nil, fmt.Errorf("fetch batch messages: %w", err)
 	}
 
-	modified, ok := res.AsModified()
-	if !ok {
-		return nil, fmt.Errorf("fetch batch messages returned unmodified")
-	}
+	// Hybrid Anchor Message Resolution (Caption tag or JSON manifest)
+	if len(msgIDs) == 1 {
+		anchorMsg := msgMap[msgIDs[0]]
+		if anchorMsg != nil {
+			var timelineIDs []int
+			// 1. Check for [timeline:502,503,501] tag in caption
+			if m := timelineTagRe.FindStringSubmatch(anchorMsg.Message); len(m) > 1 {
+				for _, s := range strings.Split(m[1], ",") {
+					if tid, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && tid > 0 {
+						timelineIDs = append(timelineIDs, tid)
+					}
+				}
+			}
+			// 2. Check for JSON manifest e.g. {"parts": [502, 503, 501]}
+			if len(timelineIDs) == 0 && strings.Contains(anchorMsg.Message, `"parts"`) {
+				var manifest struct {
+					Parts []int `json:"parts"`
+				}
+				if jErr := json.Unmarshal([]byte(anchorMsg.Message), &manifest); jErr == nil && len(manifest.Parts) > 0 {
+					timelineIDs = manifest.Parts
+				}
+			}
 
-	msgMap := make(map[int]*tg.Message)
-	for _, m := range modified.GetMessages() {
-		if msg, ok := m.(*tg.Message); ok {
-			msgMap[msg.ID] = msg
+			if len(timelineIDs) > 1 {
+				var missingIDs []int
+				for _, tid := range timelineIDs {
+					if _, exists := msgMap[tid]; !exists {
+						missingIDs = append(missingIDs, tid)
+					}
+				}
+				if len(missingIDs) > 0 {
+					extraMap, mErr := fetchMessages(missingIDs)
+					if mErr != nil {
+						return nil, fmt.Errorf("fetch remaining timeline messages: %w", mErr)
+					}
+					for k, v := range extraMap {
+						msgMap[k] = v
+					}
+				}
+				msgIDs = timelineIDs
+			}
 		}
 	}
 

@@ -100,6 +100,7 @@ func (s *Server) setupRoutes() {
 	r.Method("HEAD", "/play/v/{batch_id}/{filename}", http.HandlerFunc(s.handleVirtualTransmission(true)))
 	r.Get("/play/v/{batch_id}/{filename}", s.handleVirtualTransmission(true))
 
+	r.Get("/watch/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 	r.Get("/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 	r.Get("/stream/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 
