@@ -327,8 +327,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 		// Upload using primary bot
 		primary := b.pool.Primary()
-		storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
-		if err != nil {
+		if _, err := b.pool.Resolver().GetInputChannel(ctx, primary.API); err != nil {
 			_ = os.Remove(localPath)
 			b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Storage channel error: %s", err))
 			return
@@ -342,52 +341,58 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			},
 		}
 
-		var inputFile tg.InputFileClass
-		var upErr error
-		for attempt := 1; attempt <= 3; attempt++ {
+		var sendRes tg.UpdatesClass
+		for attempt := 1; attempt <= 4; attempt++ {
 			worker := primary
 			if attempt > 1 {
 				worker = b.pool.NextWorker()
-				time.Sleep(2 * time.Second)
+				time.Sleep(3 * time.Second)
 			}
-			u := uploader.NewUploader(worker.API).WithThreads(6).WithPartSize(512 * 1024).WithProgress(tracker)
-			inputFile, upErr = u.FromPath(ctx, localPath)
-			if upErr == nil && inputFile != nil {
-				break
+			u := uploader.NewUploader(worker.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(tracker)
+			inputFile, upErr := u.FromPath(ctx, localPath)
+			if upErr != nil || inputFile == nil {
+				slog.Warn("Single file upload attempt failed", "attempt", attempt, "err", upErr)
+				continue
 			}
-			slog.Warn("Single file upload attempt failed", "attempt", attempt, "err", upErr)
+
+			wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.API)
+			if chErr != nil || wCh == nil {
+				slog.Warn("Could not resolve storage channel for worker", "worker_id", worker.ID, "err", chErr)
+				continue
+			}
+
+			mimeType := mime.TypeByExtension(filepath.Ext(filename))
+			if mimeType == "" {
+				mimeType = "video/mp4"
+			}
+
+			capText, capEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s`\n📦 `%s`", filename, telegram.FormatBytes(totalSize)))
+			res, sendErr := worker.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				Peer: &tg.InputPeerChannel{
+					ChannelID:  wCh.ChannelID,
+					AccessHash: wCh.AccessHash,
+				},
+				Media: &tg.InputMediaUploadedDocument{
+					File:     inputFile,
+					MimeType: mimeType,
+					Attributes: []tg.DocumentAttributeClass{
+						&tg.DocumentAttributeFilename{FileName: filename},
+					},
+				},
+				Message:  capText,
+				Entities: capEntities,
+				RandomID: randInt64(),
+			})
+			if sendErr != nil || res == nil {
+				slog.Warn("Single file send media attempt failed", "attempt", attempt, "err", sendErr)
+				continue
+			}
+			sendRes = res
+			break
 		}
 		_ = os.Remove(localPath)
-		if inputFile == nil {
-			b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Telegram upload failed after 3 attempts: %s", upErr))
-			return
-		}
-
-		// Send to storage channel
-		mimeType := mime.TypeByExtension(filepath.Ext(filename))
-		if mimeType == "" {
-			mimeType = "video/mp4"
-		}
-
-		capText, capEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s`\n📦 `%s`", filename, telegram.FormatBytes(totalSize)))
-		sendRes, err := primary.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer: &tg.InputPeerChannel{
-				ChannelID:  storageChannel.ChannelID,
-				AccessHash: storageChannel.AccessHash,
-			},
-			Media: &tg.InputMediaUploadedDocument{
-				File:     inputFile,
-				MimeType: mimeType,
-				Attributes: []tg.DocumentAttributeClass{
-					&tg.DocumentAttributeFilename{FileName: filename},
-				},
-			},
-			Message:  capText,
-			Entities: capEntities,
-			RandomID: randInt64(),
-		})
-		if err != nil {
-			b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Failed to send document: %s", err))
+		if sendRes == nil {
+			b.editStatus(ctx, peer, statusMsgID, "❌ Telegram upload failed after 4 attempts.")
 			return
 		}
 
@@ -569,40 +574,29 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							},
 						}
 
-						var inputFile tg.InputFileClass
-						var uploadErr error
-						for upAttempt := 1; upAttempt <= 3; upAttempt++ {
-							clientToUse := wClient
-							if upAttempt > 1 {
-								clientToUse = b.pool.NextWorker()
-								time.Sleep(2 * time.Second)
+						for attempt := 1; attempt <= 4; attempt++ {
+							worker := wClient
+							if attempt > 1 {
+								worker = b.pool.NextWorker()
+								time.Sleep(3 * time.Second)
+							}
+							partUploaded[partIdx].Store(0)
+
+							u := uploader.NewUploader(worker.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+							inputFile, uploadErr := u.FromPath(ctx, partPath)
+							if uploadErr != nil || inputFile == nil {
+								slog.Warn("Upload slice attempt failed", "part", partNum, "attempt", attempt, "err", uploadErr)
+								continue
 							}
 
-							u := uploader.NewUploader(clientToUse.API).WithThreads(6).WithPartSize(512 * 1024).WithProgress(partTracker)
-							inputFile, uploadErr = u.FromPath(ctx, partPath)
-							if uploadErr == nil && inputFile != nil {
-								break
-							}
-							slog.Warn("Upload slice attempt failed", "part", partNum, "attempt", upAttempt, "err", uploadErr)
-						}
-						if inputFile == nil {
-							slog.Error("Slice upload failed after 3 attempts", "part", partNum, "err", uploadErr)
-							return
-						}
-
-						// Resolve channel specifically for this worker bot & send media with retry
-						var sRes tg.UpdatesClass
-						var sendErr error
-						for sendAttempt := 1; sendAttempt <= 3; sendAttempt++ {
-							sendClient := wClient
-							wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, sendClient.API)
-							if chErr != nil || wCh == nil || sendAttempt > 1 {
-								sendClient = primary
-								wCh = storageChannel
+							wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.API)
+							if chErr != nil || wCh == nil {
+								slog.Warn("Could not resolve storage channel for worker", "part", partNum, "worker_id", worker.ID, "err", chErr)
+								continue
 							}
 
 							partCap, partEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
-							sRes, sendErr = sendClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+							sRes, sendErr := worker.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 								Peer: &tg.InputPeerChannel{
 									ChannelID:  wCh.ChannelID,
 									AccessHash: wCh.AccessHash,
@@ -618,21 +612,16 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 								Entities: partEntities,
 								RandomID: randInt64(),
 							})
-							if sendErr == nil && sRes != nil {
+							if sendErr != nil || sRes == nil {
+								slog.Warn("Send slice media attempt failed", "part", partNum, "attempt", attempt, "err", sendErr)
+								continue
+							}
+
+							if msgID := extractMsgID(sRes); msgID > 0 {
+								msgIDs[partIdx] = msgID
+								slog.Info("Slice successfully saved in channel", "part", partNum, "msg_id", msgID)
 								break
 							}
-							slog.Warn("Send slice media attempt failed", "part", partNum, "attempt", sendAttempt, "err", sendErr)
-							time.Sleep(1 * time.Second)
-						}
-
-						if sRes == nil {
-							slog.Error("Send slice media failed completely after 3 attempts", "part", partNum, "err", sendErr)
-							return
-						}
-
-						if msgID := extractMsgID(sRes); msgID > 0 {
-							msgIDs[partIdx] = msgID
-							slog.Info("Slice successfully saved in channel", "part", partNum, "msg_id", msgID)
 						}
 					}()
 				}
@@ -720,40 +709,29 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 					},
 				}
 
-				var inputFile tg.InputFileClass
-				var uploadErr error
-				for upAttempt := 1; upAttempt <= 3; upAttempt++ {
-					clientToUse := wClient
-					if upAttempt > 1 {
-						clientToUse = b.pool.NextWorker()
-						time.Sleep(2 * time.Second)
+				for attempt := 1; attempt <= 4; attempt++ {
+					worker := wClient
+					if attempt > 1 {
+						worker = b.pool.NextWorker()
+						time.Sleep(3 * time.Second)
+					}
+					partUploaded[idx].Store(0)
+
+					u := uploader.NewUploader(worker.API).WithThreads(4).WithPartSize(512 * 1024).WithProgress(partTracker)
+					inputFile, uploadErr := u.FromPath(ctx, pPath)
+					if uploadErr != nil || inputFile == nil {
+						slog.Warn("Upload stream slice attempt failed", "part", pNum, "attempt", attempt, "err", uploadErr)
+						continue
 					}
 
-					u := uploader.NewUploader(clientToUse.API).WithThreads(6).WithPartSize(512 * 1024).WithProgress(partTracker)
-					inputFile, uploadErr = u.FromPath(ctx, pPath)
-					if uploadErr == nil && inputFile != nil {
-						break
-					}
-					slog.Warn("Upload stream slice attempt failed", "part", pNum, "attempt", upAttempt, "err", uploadErr)
-				}
-				if inputFile == nil {
-					slog.Error("Upload stream slice failed after 3 attempts", "part", pNum, "err", uploadErr)
-					return
-				}
-
-				// Resolve channel specifically for this worker bot & send media with retry
-				var sRes tg.UpdatesClass
-				var sendErr error
-				for sendAttempt := 1; sendAttempt <= 3; sendAttempt++ {
-					sendClient := wClient
-					wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, sendClient.API)
-					if chErr != nil || wCh == nil || sendAttempt > 1 {
-						sendClient = primary
-						wCh = storageChannel
+					wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.API)
+					if chErr != nil || wCh == nil {
+						slog.Warn("Could not resolve storage channel for worker", "part", pNum, "worker_id", worker.ID, "err", chErr)
+						continue
 					}
 
 					pCap, pEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", pName, pNum, numParts, telegram.FormatBytes(pLen)))
-					sRes, sendErr = sendClient.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+					sRes, sendErr := worker.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 						Peer: &tg.InputPeerChannel{
 							ChannelID:  wCh.ChannelID,
 							AccessHash: wCh.AccessHash,
@@ -769,21 +747,16 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 						Entities: pEntities,
 						RandomID: randInt64(),
 					})
-					if sendErr == nil && sRes != nil {
+					if sendErr != nil || sRes == nil {
+						slog.Warn("Send stream slice media attempt failed", "part", pNum, "attempt", attempt, "err", sendErr)
+						continue
+					}
+
+					if msgID := extractMsgID(sRes); msgID > 0 {
+						msgIDs[idx] = msgID
+						slog.Info("Stream slice successfully saved in channel", "part", pNum, "msg_id", msgID)
 						break
 					}
-					slog.Warn("Send stream slice media attempt failed", "part", pNum, "attempt", sendAttempt, "err", sendErr)
-					time.Sleep(1 * time.Second)
-				}
-
-				if sRes == nil {
-					slog.Error("Send stream slice failed completely after 3 attempts", "part", pNum, "err", sendErr)
-					return
-				}
-
-				if msgID := extractMsgID(sRes); msgID > 0 {
-					msgIDs[idx] = msgID
-					slog.Info("Stream slice successfully saved in channel", "part", pNum, "msg_id", msgID)
 				}
 			}(partIdx, partNum, partPath, partFilename, n, worker)
 		}
