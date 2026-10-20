@@ -3,7 +3,6 @@ package stream
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/http"
 	"sync"
@@ -23,10 +22,6 @@ type FastStreamEngine struct {
 	// Cached message metadata to avoid MTProto lookups on seek
 	msgCache   map[int]*telegram.FileProperties
 	msgCacheMu sync.RWMutex
-
-	// DC sub-client invoker cache
-	dcInvokers   map[int]tg.Invoker
-	dcInvokersMu sync.Mutex
 }
 
 func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chunkSize, prefetch int) *FastStreamEngine {
@@ -37,12 +32,11 @@ func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chu
 		prefetch = 4
 	}
 	return &FastStreamEngine{
-		pool:        pool,
-		chunkMem:    chunkCache,
-		chunkSize:   chunkSize,
-		prefetch:    prefetch,
-		msgCache:    make(map[int]*telegram.FileProperties),
-		dcInvokers:  make(map[int]tg.Invoker),
+		pool:       pool,
+		chunkMem:   chunkCache,
+		chunkSize:  chunkSize,
+		prefetch:   prefetch,
+		msgCache:   make(map[int]*telegram.FileProperties),
 	}
 }
 
@@ -100,34 +94,6 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 	return props, nil
 }
 
-func (e *FastStreamEngine) getInvokerForDC(ctx context.Context, dcID int) tg.Invoker {
-	primary := e.pool.Primary()
-	if primary == nil {
-		return nil
-	}
-
-	if dcID <= 0 {
-		return primary.Client
-	}
-
-	e.dcInvokersMu.Lock()
-	defer e.dcInvokersMu.Unlock()
-
-	if inv, found := e.dcInvokers[dcID]; found {
-		return inv
-	}
-
-	// Connect directly to media-only DC cluster
-	inv, err := primary.Client.MediaOnly(ctx, dcID, 5)
-	if err != nil {
-		slog.Warn("Failed to create MediaOnly invoker, falling back to primary Client", "dc", dcID, "err", err)
-		return primary.Client
-	}
-
-	e.dcInvokers[dcID] = inv
-	return inv
-}
-
 type chunkItem struct {
 	index int
 	data  []byte
@@ -177,8 +143,11 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	invoker := e.getInvokerForDC(ctx, props.DCID)
-	api := tg.NewClient(invoker)
+	primary := e.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return fmt.Errorf("bot pool not ready")
+	}
+	api := primary.API
 
 	// Determine worker concurrency for parallel chunk download
 	concurrency := 4

@@ -7,7 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"f2l/internal/cache"
 	"f2l/internal/config"
+	"f2l/internal/security"
 	"f2l/internal/stream"
 	"f2l/internal/telegram"
 
@@ -18,14 +20,16 @@ type Bot struct {
 	cfg           *config.Config
 	pool          *telegram.BotPool
 	virtualStream *stream.VirtualStreamEngine
+	cache         *cache.LRUCache
 	dispatcher    tg.UpdateDispatcher
 }
 
-func NewBot(cfg *config.Config, pool *telegram.BotPool, virtualStream *stream.VirtualStreamEngine) *Bot {
+func NewBot(cfg *config.Config, pool *telegram.BotPool, virtualStream *stream.VirtualStreamEngine, chunkCache *cache.LRUCache) *Bot {
 	b := &Bot{
 		cfg:           cfg,
 		pool:          pool,
 		virtualStream: virtualStream,
+		cache:         chunkCache,
 		dispatcher:    tg.NewUpdateDispatcher(),
 	}
 
@@ -52,6 +56,24 @@ func (b *Bot) isUserAllowed(userID int64) bool {
 	return false
 }
 
+func createStreamMarkup(streamURL, playerURL, downloadURL string) *tg.ReplyInlineMarkup {
+	return &tg.ReplyInlineMarkup{
+		Rows: []tg.KeyboardButtonRow{
+			{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{Text: "⚡ Direct Stream", URL: streamURL},
+					&tg.KeyboardButtonURL{Text: "📥 Fast Download", URL: downloadURL},
+				},
+			},
+			{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{Text: "🎬 Open in VLC / Web Player", URL: playerURL},
+				},
+			},
+		},
+	}
+}
+
 func (b *Bot) registerHandlers() {
 	b.dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
 		msg, ok := u.Message.(*tg.Message)
@@ -61,14 +83,21 @@ func (b *Bot) registerHandlers() {
 
 		peerUser, ok := msg.PeerID.(*tg.PeerUser)
 		if !ok {
-			return nil // only handle private chats
+			return nil // only handle private user chats
 		}
 
-		user, ok := e.Users[peerUser.UserID]
-		if !ok {
-			return nil
+		var userPeer tg.InputPeerClass
+		firstName := "User"
+		if user, ok := e.Users[peerUser.UserID]; ok {
+			userPeer = user.AsInputPeer()
+			if user.FirstName != "" {
+				firstName = user.FirstName
+			}
+		} else {
+			userPeer = &tg.InputPeerUser{
+				UserID: peerUser.UserID,
+			}
 		}
-		userPeer := user.AsInputPeer()
 
 		if !b.isUserAllowed(peerUser.UserID) {
 			b.replyText(ctx, userPeer, msg.ID, "⛔ **Access Denied:** You are not authorized to use this bot.")
@@ -76,6 +105,7 @@ func (b *Bot) registerHandlers() {
 		}
 
 		text := strings.TrimSpace(msg.Message)
+		slog.Info("📩 Received private message", "user_id", peerUser.UserID, "text", text, "has_media", msg.Media != nil)
 
 		// 1. Check commands
 		if strings.HasPrefix(text, "/") {
@@ -85,10 +115,16 @@ func (b *Bot) registerHandlers() {
 
 			switch cmd {
 			case "/start":
-				b.handleStart(ctx, userPeer, msg.ID, user.FirstName)
+				b.handleStart(ctx, userPeer, msg.ID, firstName)
 				return nil
 			case "/help":
 				b.handleHelp(ctx, userPeer, msg.ID)
+				return nil
+			case "/status":
+				b.handleStatus(ctx, userPeer, msg.ID)
+				return nil
+			case "/privacy":
+				b.handlePrivacy(ctx, userPeer, msg.ID)
 				return nil
 			case "/merge", "/stitch", "/join":
 				replyTargetID := 0
@@ -116,13 +152,14 @@ func (b *Bot) registerHandlers() {
 func (b *Bot) handleStart(ctx context.Context, peer tg.InputPeerClass, replyToID int, firstName string) {
 	text := fmt.Sprintf(
 		"👋 **Hello, %s!**\n\n"+
-			"🚀 **High-Speed Telegram Stream & Leech Engine (Go 2.0)**\n\n"+
+			"🚀 **High-Speed Telegram Stream & Direct Link Bot (Go Edition)**\n\n"+
 			"⚡ **Features:**\n"+
-			"• Instant direct streaming links for any file\n"+
-			"• High-speed RFC 7233 byte-range seeking for VLC & Web Players\n"+
-			"• Stateless 10GB+ virtual multi-part merging (`/merge`)\n"+
-			"• Cloud Leeching engine with multi-bot parallel uploads (`/leech`)\n\n"+
-			"Send or forward me any video, document, or audio file to get instant streaming links!",
+			"• Instant streaming & download links for any file\n"+
+			"• Ultra-low latency RFC 7233 byte-range streaming for VLC & Web Players\n"+
+			"• 10GB+ Virtual file stitching with `/merge`\n"+
+			"• High-speed multi-bot parallel leeching with `/leech`\n"+
+			"• In-memory LRU caching with 0ms seek response\n\n"+
+			"📤 **Send or forward me any video, document, or audio file to get started!**",
 		firstName,
 	)
 	b.replyText(ctx, peer, replyToID, text)
@@ -130,9 +167,46 @@ func (b *Bot) handleStart(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 func (b *Bot) handleHelp(ctx context.Context, peer tg.InputPeerClass, replyToID int) {
 	text := "ℹ️ **Available Commands:**\n\n" +
-		"• `/leech <url> [name.mkv]` - Leech any direct link (splits >2GB into virtual 10GB+ link)\n" +
-		"• `/merge <count>` - Reply to part 1 to merge split 2GB parts into 1 stream\n" +
-		"• `/help` - Show this help message"
+		"• `/start` - Check if the bot is alive & show welcome card\n" +
+		"• `/help` - Show this command reference\n" +
+		"• `/status` - View live streaming engine performance & cache stats\n" +
+		"• `/privacy` - View privacy policy\n" +
+		"• `/leech <url> [name.mkv]` - Leech any direct link (splits >2GB into virtual parts)\n" +
+		"• `/merge <count>` - Reply to part 1 to merge split 2GB parts into 1 seamless stream\n\n" +
+		"💡 _Just send or forward any video or document to get instant direct links!_"
+	b.replyText(ctx, peer, replyToID, text)
+}
+
+func (b *Bot) handlePrivacy(ctx context.Context, peer tg.InputPeerClass, replyToID int) {
+	text := "🔒 **Privacy Policy**\n\n" +
+		"• This bot stores files strictly in your configured private storage channel.\n" +
+		"• All streaming links are stateless and cryptographically signed.\n" +
+		"• No personal data, chat history, or logs are shared with third parties."
+	b.replyText(ctx, peer, replyToID, text)
+}
+
+func (b *Bot) handleStatus(ctx context.Context, peer tg.InputPeerClass, replyToID int) {
+	stats := b.cache.GetStats()
+	workerCount := len(b.pool.GetAvailableWorkers())
+
+	text := fmt.Sprintf(
+		"📊 **FileStream Performance Dashboard (Go Edition)**\n\n"+
+			"⚡ **Stream Engine:** Parallel Prefetch (%dx concurrency)\n"+
+			"🤖 **Active Worker Clients:** `%d`\n"+
+			"💾 **LRU Chunk Cache:** `%.1f MB / %.1f MB`\n"+
+			"📦 **Cached Chunks:** `%d`\n"+
+			"🎯 **Cache Hit Ratio:** `%.1f%%` (`%d` hits, `%d` misses)\n"+
+			"🌐 **Server Port:** `%d`",
+		b.cfg.Stream.PrefetchChunks,
+		workerCount,
+		stats.CachedSizeMB,
+		stats.MaxSizeMB,
+		stats.CachedChunks,
+		stats.HitRatio,
+		stats.Hits,
+		stats.Misses,
+		b.cfg.Server.Port,
+	)
 	b.replyText(ctx, peer, replyToID, text)
 }
 
@@ -185,9 +259,10 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 	}
 
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
-	streamURL := fmt.Sprintf("%s/inline/%d/%s", baseURL, channelMsgID, props.Name)
-	playerURL := fmt.Sprintf("%s/stream/%d/%s", baseURL, channelMsgID, props.Name)
-	downloadURL := fmt.Sprintf("%s/dl/%d/%s", baseURL, channelMsgID, props.Name)
+	slug := security.EncodeFileSlug(channelMsgID, b.cfg.Telegram.BotToken)
+	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, props.Name)
+	playerURL := fmt.Sprintf("%s/stream/%s/%s", baseURL, slug, props.Name)
+	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, props.Name)
 
 	reply := fmt.Sprintf(
 		"📁 **File Name:** `%s`\n"+
@@ -200,7 +275,8 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 		props.Name, telegram.FormatBytes(props.Size), streamURL, playerURL, downloadURL,
 	)
 
-	b.replyText(ctx, peer, msg.ID, reply)
+	markup := createStreamMarkup(streamURL, playerURL, downloadURL)
+	b.replyWithMarkup(ctx, peer, msg.ID, reply, markup)
 }
 
 func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID int, targetMsgID int, args []string) {
@@ -297,37 +373,44 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 			b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Part %d is not a valid message.", idx+1))
 			return
 		}
+
 		props, err := telegram.GetFileProperties(msg)
 		if err != nil {
-			b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Part %d has no valid media file.", idx+1))
+			b.replyText(ctx, peer, replyToID, fmt.Sprintf("❌ Part %d has unsupported media.", idx+1))
 			return
 		}
+
+		totalSize += props.Size
 		if idx == 0 {
 			unifiedName = stream.CleanVirtualName(props.Name)
+			if !strings.HasSuffix(unifiedName, ".mkv") && !strings.HasSuffix(unifiedName, ".mp4") {
+				unifiedName += ".mkv"
+			}
 		}
-		totalSize += props.Size
 	}
 
-	batchToken := stream.EncodeBatch(msgIDs)
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
-	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, batchToken, unifiedName)
-	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, batchToken, unifiedName)
-	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, batchToken, unifiedName)
+	batchToken := stream.EncodeBatch(msgIDs)
+	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, unifiedName)
+	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, slug, unifiedName)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, unifiedName)
 
-	text := fmt.Sprintf(
-		"🎬 **Virtual Multi-Part Stream Created! (Go)**\n\n"+
+	reply := fmt.Sprintf(
+		"🎬 **Virtual Merge Complete!**\n\n"+
 			"📁 **Merged Name:** `%s`\n"+
 			"📦 **Total Size:** `%s` (%d Parts)\n"+
-			"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching (Stateless)`\n\n"+
+			"⚡ **Stream Protocol:** `RFC 7233 Virtual Stitching`\n\n"+
 			"🔗 **Single Seamless Links:**\n"+
 			"• **Direct Stream:** [Click Here](%s)\n"+
 			"• **Web & VLC Player:** [Click Here](%s)\n"+
-			"• **Single 10GB Download:** [Click Here](%s)\n\n"+
-			"💡 _All %d parts stream and seek seamlessly as one continuous 10GB+ file without any database!_",
+			"• **Single Download:** [Click Here](%s)\n\n"+
+			"💡 _All %d parts will stream and seek seamlessly as one contiguous file!_",
 		unifiedName, telegram.FormatBytes(totalSize), count, streamURL, playerURL, downloadURL, count,
 	)
 
-	b.replyText(ctx, peer, replyToID, text)
+	markup := createStreamMarkup(streamURL, playerURL, downloadURL)
+	b.replyWithMarkup(ctx, peer, replyToID, reply, markup)
 }
 
 func (b *Bot) replyText(ctx context.Context, peer tg.InputPeerClass, replyToID int, text string) {
@@ -341,6 +424,23 @@ func (b *Bot) replyText(ctx context.Context, peer tg.InputPeerClass, replyToID i
 		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
 		RandomID: randInt64(),
 	})
+}
+
+func (b *Bot) replyWithMarkup(ctx context.Context, peer tg.InputPeerClass, replyToID int, text string, markup tg.ReplyMarkupClass) {
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return
+	}
+	_, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:        peer,
+		Message:     text,
+		ReplyTo:     &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
+		RandomID:    randInt64(),
+		ReplyMarkup: markup,
+	})
+	if err != nil {
+		slog.Error("Failed to send message with markup", "error", err)
+	}
 }
 
 func (b *Bot) sendReply(ctx context.Context, peer tg.InputPeerClass, replyToID int, text string) (int, error) {
@@ -378,5 +478,18 @@ func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int,
 		Peer:    peer,
 		ID:      msgID,
 		Message: text,
+	})
+}
+
+func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) {
+	primary := b.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() || msgID == 0 {
+		return
+	}
+	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		Peer:        peer,
+		ID:          msgID,
+		Message:     text,
+		ReplyMarkup: markup,
 	})
 }

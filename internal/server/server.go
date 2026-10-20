@@ -12,6 +12,7 @@ import (
 
 	"f2l/internal/cache"
 	"f2l/internal/config"
+	"f2l/internal/security"
 	"f2l/internal/stream"
 	"f2l/internal/telegram"
 
@@ -141,9 +142,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileInfo(w http.ResponseWriter, r *http.Request) {
 	fileIDStr := chi.URLParam(r, "file_id")
-	fileID, err := strconv.Atoi(fileIDStr)
-	if err != nil {
-		http.Error(w, "Invalid file ID", http.StatusBadRequest)
+	fileID, ok := security.DecodeFileSlug(fileIDStr, s.cfg.Telegram.BotToken)
+	if !ok {
+		http.Error(w, "Invalid file token", http.StatusBadRequest)
 		return
 	}
 
@@ -154,6 +155,7 @@ func (s *Server) handleFileInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	base := s.getBaseURL(r)
+	slug := security.EncodeFileSlug(fileID, s.cfg.Telegram.BotToken)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"file_id":        fileID,
@@ -161,18 +163,18 @@ func (s *Server) handleFileInfo(w http.ResponseWriter, r *http.Request) {
 		"size_bytes":     props.Size,
 		"size_formatted": telegram.FormatBytes(props.Size),
 		"mime_type":      props.MimeType,
-		"stream_url":     fmt.Sprintf("%s/inline/%d/%s", base, fileID, props.Name),
-		"download_url":   fmt.Sprintf("%s/dl/%d/%s", base, fileID, props.Name),
-		"web_player_url": fmt.Sprintf("%s/stream/%d/%s", base, fileID, props.Name),
+		"stream_url":     fmt.Sprintf("%s/inline/%s/%s", base, slug, props.Name),
+		"download_url":   fmt.Sprintf("%s/dl/%s/%s", base, slug, props.Name),
+		"web_player_url": fmt.Sprintf("%s/stream/%s/%s", base, slug, props.Name),
 	})
 }
 
 func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fileIDStr := chi.URLParam(r, "file_id")
-		fileID, err := strconv.Atoi(fileIDStr)
-		if err != nil {
-			http.Error(w, "Invalid file ID", http.StatusBadRequest)
+		fileID, ok := security.DecodeFileSlug(fileIDStr, s.cfg.Telegram.BotToken)
+		if !ok {
+			http.Error(w, "Invalid file token", http.StatusBadRequest)
 			return
 		}
 
@@ -231,9 +233,9 @@ func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
 
 func (s *Server) handleWebPlayer(w http.ResponseWriter, r *http.Request) {
 	fileIDStr := chi.URLParam(r, "file_id")
-	fileID, err := strconv.Atoi(fileIDStr)
-	if err != nil {
-		http.Error(w, "Invalid file ID", http.StatusBadRequest)
+	fileID, ok := security.DecodeFileSlug(fileIDStr, s.cfg.Telegram.BotToken)
+	if !ok {
+		http.Error(w, "Invalid file token", http.StatusBadRequest)
 		return
 	}
 
@@ -249,8 +251,8 @@ func (s *Server) handleWebPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	base := s.getBaseURL(r)
-	mediaLink := fmt.Sprintf("%s/inline/%d/%s", base, fileID, filename)
-	downloadLink := fmt.Sprintf("%s/dl/%d/%s", base, fileID, filename)
+	mediaLink := fmt.Sprintf("%s/inline/%s/%s", base, fileIDStr, filename)
+	downloadLink := fmt.Sprintf("%s/dl/%s/%s", base, fileIDStr, filename)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = RenderPlayer(w, PlayerData{
@@ -268,34 +270,38 @@ func (s *Server) handleWebPlayer(w http.ResponseWriter, r *http.Request) {
 
 // Virtual Multi-Part Handlers
 func (s *Server) handleVirtualFileInfo(w http.ResponseWriter, r *http.Request) {
-	batchID := chi.URLParam(r, "batch_id")
-	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+	batchIDStr := chi.URLParam(r, "batch_id")
+	rawBatchID := security.DecodeVirtualSlug(batchIDStr, s.cfg.Telegram.BotToken)
+
+	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), rawBatchID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
 	base := s.getBaseURL(r)
+	slug := security.EncodeVirtualSlug(rawBatchID, s.cfg.Telegram.BotToken)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"batch_id":         batchID,
+		"batch_id":         slug,
 		"filename":         meta.Filename,
 		"total_size_bytes": meta.TotalSize,
 		"size_formatted":   telegram.FormatBytes(meta.TotalSize),
 		"mime_type":        meta.MimeType,
 		"parts_count":      len(meta.Parts),
-		"stream_url":       fmt.Sprintf("%s/inline/v/%s/%s", base, batchID, meta.Filename),
-		"download_url":     fmt.Sprintf("%s/dl/v/%s/%s", base, batchID, meta.Filename),
-		"web_player_url":   fmt.Sprintf("%s/v/%s/%s", base, batchID, meta.Filename),
+		"stream_url":       fmt.Sprintf("%s/inline/v/%s/%s", base, slug, meta.Filename),
+		"download_url":     fmt.Sprintf("%s/dl/v/%s/%s", base, slug, meta.Filename),
+		"web_player_url":   fmt.Sprintf("%s/v/%s/%s", base, slug, meta.Filename),
 	})
 }
 
 func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		batchID := chi.URLParam(r, "batch_id")
+		batchIDStr := chi.URLParam(r, "batch_id")
+		rawBatchID := security.DecodeVirtualSlug(batchIDStr, s.cfg.Telegram.BotToken)
 		filename := chi.URLParam(r, "filename")
 
-		meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+		meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), rawBatchID)
 		if err != nil {
 			http.Error(w, "Virtual batch not found: "+err.Error(), http.StatusNotFound)
 			return
@@ -339,7 +345,7 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 		}
 
-		err = s.virtualStream.StreamVirtualRange(r.Context(), w, batchID, start, end, contentLength)
+		err = s.virtualStream.StreamVirtualRange(r.Context(), w, rawBatchID, start, end, contentLength)
 		if err != nil {
 			slog.Debug("Virtual stream error", "error", err)
 		}
@@ -347,10 +353,11 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 }
 
 func (s *Server) handleVirtualWebPlayer(w http.ResponseWriter, r *http.Request) {
-	batchID := chi.URLParam(r, "batch_id")
+	batchIDStr := chi.URLParam(r, "batch_id")
+	rawBatchID := security.DecodeVirtualSlug(batchIDStr, s.cfg.Telegram.BotToken)
 	filename := chi.URLParam(r, "filename")
 
-	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), batchID)
+	meta, err := s.virtualStream.GetVirtualMetadata(r.Context(), rawBatchID)
 	if err != nil {
 		http.Error(w, "Virtual batch not found: "+err.Error(), http.StatusNotFound)
 		return
@@ -361,8 +368,8 @@ func (s *Server) handleVirtualWebPlayer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	base := s.getBaseURL(r)
-	mediaLink := fmt.Sprintf("%s/inline/v/%s/%s", base, batchID, filename)
-	downloadLink := fmt.Sprintf("%s/dl/v/%s/%s", base, batchID, filename)
+	mediaLink := fmt.Sprintf("%s/inline/v/%s/%s", base, batchIDStr, filename)
+	downloadLink := fmt.Sprintf("%s/dl/v/%s/%s", base, batchIDStr, filename)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = RenderPlayer(w, PlayerData{

@@ -70,7 +70,7 @@ func main() {
 	virtualStreamer := stream.NewVirtualStreamEngine(fastStreamer, pool)
 
 	// 7. Bot Update Dispatcher & Handlers
-	botEngine := bot.NewBot(cfg, pool, virtualStreamer)
+	botEngine := bot.NewBot(cfg, pool, virtualStreamer, chunkCache)
 
 	// 8. Start Telegram Bot Pool
 	slog.Info("Starting Telegram MTProto bot pool...")

@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"f2l/internal/security"
 	"f2l/internal/stream"
 	"f2l/internal/telegram"
 
@@ -270,9 +271,10 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 		}
 
-		streamURL := fmt.Sprintf("%s/inline/%d/%s", baseURL, sentMsgID, filename)
-		playerURL := fmt.Sprintf("%s/stream/%d/%s", baseURL, sentMsgID, filename)
-		downloadURL := fmt.Sprintf("%s/dl/%d/%s", baseURL, sentMsgID, filename)
+		slug := security.EncodeFileSlug(sentMsgID, b.cfg.Telegram.BotToken)
+		streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, filename)
+		playerURL := fmt.Sprintf("%s/stream/%s/%s", baseURL, slug, filename)
+		downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, filename)
 
 		successText := fmt.Sprintf(
 			"🎬 **Leech Complete! (Go Fast-Engine)**\n\n"+
@@ -286,7 +288,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			filename, telegram.FormatBytes(totalSize), streamURL, playerURL, downloadURL,
 		)
 
-		b.editStatus(ctx, peer, statusMsgID, successText)
+		markup := createStreamMarkup(streamURL, playerURL, downloadURL)
+		b.editStatusWithMarkup(ctx, peer, statusMsgID, successText, markup)
 		return
 	}
 
@@ -540,9 +543,10 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	}
 
 	batchToken := stream.EncodeBatch(validIDs)
-	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, batchToken, cleanName)
-	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, batchToken, cleanName)
-	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, batchToken, cleanName)
+	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, cleanName)
+	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, slug, cleanName)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, cleanName)
 
 	successText := fmt.Sprintf(
 		"🎬 **Multi-Bot Parallel Leech Complete! (Go Engine)**\n\n"+
@@ -558,5 +562,6 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		cleanName, telegram.FormatBytes(totalSize), len(validIDs), activeWorkers, streamURL, playerURL, downloadURL, len(validIDs),
 	)
 
-	b.editStatus(ctx, peer, statusMsgID, successText)
+	markup := createStreamMarkup(streamURL, playerURL, downloadURL)
+	b.editStatusWithMarkup(ctx, peer, statusMsgID, successText, markup)
 }
