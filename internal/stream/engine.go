@@ -96,12 +96,6 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 	return props, nil
 }
 
-type chunkItem struct {
-	index int
-	data  []byte
-	err   error
-}
-
 func (e *FastStreamEngine) StreamFileRange(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -145,58 +139,52 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	workers := e.pool.GetAvailableWorkers()
-	if len(workers) == 0 {
-		return fmt.Errorf("bot pool not ready")
+	// Select ready client: Primary bot has the authenticated MTProto session
+	botClient := e.pool.Primary()
+	if botClient == nil || !botClient.IsReady.Load() {
+		botClient = e.pool.NextWorker()
 	}
-	numBots := len(workers)
+	if botClient == nil {
+		return fmt.Errorf("no ready telegram client available")
+	}
 
-	// Bounded prefetch window: at most 4 chunks (4 MB) in flight to protect memory
-	prefetch := 4
-	if e.prefetch > 0 && e.prefetch < 6 {
-		prefetch = e.prefetch
+	concurrency := 4
+	if e.prefetch >= 2 && e.prefetch <= 8 {
+		concurrency = e.prefetch
 	}
-	if chunksToStream < prefetch {
-		prefetch = chunksToStream
+	if chunksToStream < concurrency {
+		concurrency = chunksToStream
+	}
+
+	type streamChunk struct {
+		index int
+		data  []byte
+		err   error
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	// Sliding window feeder:
-	// feedSignal grants permission to queue exactly 1 chunk ahead into taskChan.
-	// Initial capacity is prefetch tokens.
-	feedSignal := make(chan struct{}, prefetch)
-	for i := 0; i < prefetch; i++ {
-		feedSignal <- struct{}{}
-	}
-
-	taskChan := make(chan int, prefetch)
+	// Task channel with bounded buffer for smooth continuous prefetching ahead of the player
+	taskChan := make(chan int, concurrency*2)
 	go func() {
 		defer close(taskChan)
 		for nextChunk := 0; nextChunk < chunksToStream; nextChunk++ {
 			select {
 			case <-workerCtx.Done():
 				return
-			case <-feedSignal:
-				select {
-				case <-workerCtx.Done():
-					return
-				case taskChan <- nextChunk:
-				}
+			case taskChan <- nextChunk:
 			}
 		}
 	}()
 
-	resultChan := make(chan chunkItem, prefetch*2)
+	resultChan := make(chan streamChunk, concurrency*2)
 	var wg sync.WaitGroup
 
-	// Concurrency equals prefetch (multi-bot distributed)
-	concurrency := prefetch
-	for wIdx := 0; wIdx < concurrency; wIdx++ {
-		botClient := workers[wIdx%numBots]
+	// Pipelined workers: multiplex multiple in-flight chunk requests on the warm primary connection
+	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
-		go func(workerBot *telegram.WorkerClient) {
+		go func() {
 			defer wg.Done()
 			for idx := range taskChan {
 				select {
@@ -208,16 +196,16 @@ func (e *FastStreamEngine) StreamFileRange(
 				curOffsetChunk := offsetChunk + int64(idx)
 				curCacheKey := fmt.Sprintf("%d_%d", fileID, curOffsetChunk)
 
-				// Fast path: In-memory cache hit
+				// 1. Check in-memory LRU cache
 				if cached, ok := e.chunkMem.Get(curCacheKey); ok {
 					select {
-					case resultChan <- chunkItem{index: idx, data: cached}:
+					case resultChan <- streamChunk{index: idx, data: cached}:
 					case <-workerCtx.Done():
 					}
 					continue
 				}
 
-				// Network fetch via this worker bot with retry fallback
+				// 2. Fetch chunk from Telegram MTProto on warm persistent connection
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -228,28 +216,25 @@ func (e *FastStreamEngine) StreamFileRange(
 
 				var res tg.UploadFileClass
 				var fetchErr error
-				for attempt := 1; attempt <= 2; attempt++ {
-					botToUse := workerBot
-					if attempt > 1 {
-						if primary := e.pool.Primary(); primary != nil {
-							botToUse = primary
-						}
-						time.Sleep(300 * time.Millisecond)
-					}
-					if botToUse == nil {
-						fetchErr = fmt.Errorf("no bot available")
-						break
-					}
-					res, fetchErr = botToUse.API.UploadGetFile(workerCtx, req)
+
+				for attempt := 1; attempt <= 3; attempt++ {
+					res, fetchErr = botClient.API.UploadGetFile(workerCtx, req)
 					if fetchErr == nil && res != nil {
 						break
 					}
+					if workerCtx.Err() != nil {
+						return
+					}
+					time.Sleep(100 * time.Millisecond)
 				}
+
 				if fetchErr != nil || res == nil {
-					slog.Error("UploadGetFile failed after retries", "chunk", curOffsetChunk, "err", fetchErr)
-					select {
-					case resultChan <- chunkItem{index: idx, err: fetchErr}:
-					case <-workerCtx.Done():
+					if workerCtx.Err() == nil {
+						slog.Warn("UploadGetFile failed", "file_id", fileID, "chunk", curOffsetChunk, "err", fetchErr)
+						select {
+						case resultChan <- streamChunk{index: idx, err: fetchErr}:
+						case <-workerCtx.Done():
+						}
 					}
 					return
 				}
@@ -260,13 +245,13 @@ func (e *FastStreamEngine) StreamFileRange(
 					chunkBytes = v.Bytes
 				case *tg.UploadFileCDNRedirect:
 					select {
-					case resultChan <- chunkItem{index: idx, err: fmt.Errorf("CDN redirect not supported")}:
+					case resultChan <- streamChunk{index: idx, err: fmt.Errorf("CDN redirect not supported")}:
 					case <-workerCtx.Done():
 					}
 					return
 				default:
 					select {
-					case resultChan <- chunkItem{index: idx, err: fmt.Errorf("unexpected UploadFile response type")}:
+					case resultChan <- streamChunk{index: idx, err: fmt.Errorf("unexpected file response")}:
 					case <-workerCtx.Done():
 					}
 					return
@@ -276,23 +261,23 @@ func (e *FastStreamEngine) StreamFileRange(
 				e.chunkMem.Set(curCacheKey, chunkBytes)
 
 				select {
-				case resultChan <- chunkItem{index: idx, data: chunkBytes}:
+				case resultChan <- streamChunk{index: idx, data: chunkBytes}:
 				case <-workerCtx.Done():
 					return
 				}
 			}
-		}(botClient)
+		}()
 	}
 
-	// Close resultChan when all workers finish
 	go func() {
 		wg.Wait()
 		close(resultChan)
 	}()
 
+	// Consumer loop: reassemble in exact numerical order and write with immediate flush
 	var bytesStreamed int64 = 0
-	expectedIdx := 0
 	flusher, hasFlusher := w.(http.Flusher)
+	expectedIdx := 0
 	pendingChunks := make(map[int][]byte)
 
 	for {
@@ -300,7 +285,6 @@ func (e *FastStreamEngine) StreamFileRange(
 			break
 		}
 
-		// Check if next in-order chunk is already available in pending buffer
 		if chunk, exists := pendingChunks[expectedIdx]; exists {
 			delete(pendingChunks, expectedIdx)
 
@@ -322,7 +306,7 @@ func (e *FastStreamEngine) StreamFileRange(
 			if len(chunk) > 0 {
 				n, err := w.Write(chunk)
 				if err != nil {
-					return err // Client closed the connection
+					return err // Player disconnected or seeked
 				}
 				bytesStreamed += int64(n)
 				if hasFlusher {
@@ -331,24 +315,17 @@ func (e *FastStreamEngine) StreamFileRange(
 			}
 
 			expectedIdx++
-
-			// Signal feeder to allow the next chunk into the prefetch window
-			select {
-			case feedSignal <- struct{}{}:
-			default:
-			}
 			continue
 		}
 
-		// Wait for next result from parallel workers
+		// Wait for next completed chunk
 		item, ok := <-resultChan
 		if !ok {
-			break // No more items
+			break
 		}
 		if item.err != nil {
 			return item.err
 		}
-
 		pendingChunks[item.index] = item.data
 	}
 
