@@ -151,10 +151,12 @@ func (e *FastStreamEngine) StreamFileRange(
 	}
 	numBots := len(workers)
 
-	// Bounded prefetch window: at most 4 chunks (4 MB) in flight to protect memory
-	prefetch := 4
-	if e.prefetch > 0 && e.prefetch < 6 {
+	// Optimal prefetch window for smooth 4K/1080p playback across all worker bots
+	prefetch := 8
+	if e.prefetch >= 4 && e.prefetch <= 16 {
 		prefetch = e.prefetch
+	} else if numBots > 4 {
+		prefetch = numBots
 	}
 	if chunksToStream < prefetch {
 		prefetch = chunksToStream
@@ -246,6 +248,10 @@ func (e *FastStreamEngine) StreamFileRange(
 					}
 				}
 				if fetchErr != nil || res == nil {
+					if workerCtx.Err() != nil {
+						// Stream closed or client seeked/disconnected - normal player behavior
+						return
+					}
 					slog.Error("UploadGetFile failed after retries", "chunk", curOffsetChunk, "err", fetchErr)
 					select {
 					case resultChan <- chunkItem{index: idx, err: fetchErr}:
