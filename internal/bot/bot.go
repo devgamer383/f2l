@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -260,9 +261,10 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
 	slug := security.EncodeFileSlug(channelMsgID, b.cfg.Telegram.BotToken)
-	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, props.Name)
-	playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, props.Name)
-	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, props.Name)
+	safeName := url.PathEscape(props.Name)
+	streamURL := fmt.Sprintf("%s/inline/%s/%s", baseURL, slug, safeName)
+	playerURL := fmt.Sprintf("%s/watch/%s/%s?v=v2", baseURL, slug, safeName)
+	downloadURL := fmt.Sprintf("%s/dl/%s/%s", baseURL, slug, safeName)
 
 	reply := fmt.Sprintf(
 		"📁 **File Name:** `%s`\n"+
@@ -392,9 +394,10 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 	baseURL := strings.TrimRight(b.cfg.Server.BaseURL, "/")
 	batchToken := stream.EncodeBatch(msgIDs)
 	slug := security.EncodeVirtualSlug(batchToken, b.cfg.Telegram.BotToken)
-	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, unifiedName)
-	playerURL := fmt.Sprintf("%s/v/%s/%s", baseURL, slug, unifiedName)
-	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, unifiedName)
+	safeUnifiedName := url.PathEscape(unifiedName)
+	streamURL := fmt.Sprintf("%s/inline/v/%s/%s", baseURL, slug, safeUnifiedName)
+	playerURL := fmt.Sprintf("%s/v/%s/%s?v=v2", baseURL, slug, safeUnifiedName)
+	downloadURL := fmt.Sprintf("%s/dl/v/%s/%s", baseURL, slug, safeUnifiedName)
 
 	reply := fmt.Sprintf(
 		"🎬 **Virtual Merge Complete!**\n\n"+
@@ -443,7 +446,17 @@ func (b *Bot) replyWithMarkup(ctx context.Context, peer tg.InputPeerClass, reply
 		ReplyMarkup: markup,
 	})
 	if err != nil {
-		slog.Error("Failed to send message with markup", "error", err)
+		slog.Warn("Failed to send message with markup, falling back to clean text", "error", err)
+		_, errFallback := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     peer,
+			Message:  cleanMsg,
+			Entities: entities,
+			ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyToID},
+			RandomID: randInt64(),
+		})
+		if errFallback != nil {
+			slog.Error("Failed to send fallback message", "error", errFallback)
+		}
 	}
 }
 
@@ -495,11 +508,20 @@ func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, 
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+	_, err := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 		Peer:        peer,
 		ID:          msgID,
 		Message:     cleanMsg,
 		Entities:    entities,
 		ReplyMarkup: markup,
 	})
+	if err != nil {
+		slog.Warn("Failed to edit message with markup, falling back to clean text", "error", err)
+		_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+			Peer:     peer,
+			ID:       msgID,
+			Message:  cleanMsg,
+			Entities: entities,
+		})
+	}
 }
