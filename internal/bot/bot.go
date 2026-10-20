@@ -227,15 +227,16 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 		return
 	}
 
-	// Forward / copy message to storage channel
+	// Copy message to storage channel without quoting author (CopyMessage behavior)
 	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: peer,
 		ToPeer: &tg.InputPeerChannel{
 			ChannelID:  storageChannel.ChannelID,
 			AccessHash: storageChannel.AccessHash,
 		},
-		ID:       []int{msg.ID},
-		RandomID: []int64{randInt64()},
+		ID:         []int{msg.ID},
+		RandomID:   []int64{randInt64()},
+		DropAuthor: true,
 	})
 	if err != nil {
 		slog.Error("Forward to storage channel failed", "error", err)
@@ -294,15 +295,16 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 		return
 	}
 
-	// Forward replied message to storage channel to get channel message ID
+	// Copy replied message to storage channel without quoting author (CopyMessage behavior)
 	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: peer,
 		ToPeer: &tg.InputPeerChannel{
 			ChannelID:  storageChannel.ChannelID,
 			AccessHash: storageChannel.AccessHash,
 		},
-		ID:       []int{targetMsgID},
-		RandomID: []int64{randInt64()},
+		ID:         []int{targetMsgID},
+		RandomID:   []int64{randInt64()},
+		DropAuthor: true,
 	})
 	if err != nil {
 		b.replyText(ctx, peer, replyToID, "❌ Could not process replied message.")
