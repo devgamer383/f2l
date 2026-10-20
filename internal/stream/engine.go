@@ -148,8 +148,8 @@ func (e *FastStreamEngine) StreamFileRange(
 		return fmt.Errorf("no ready telegram client available")
 	}
 
-	concurrency := 4
-	if e.prefetch >= 2 && e.prefetch <= 8 {
+	concurrency := 8
+	if e.prefetch >= 2 && e.prefetch <= 16 {
 		concurrency = e.prefetch
 	}
 	if chunksToStream < concurrency {

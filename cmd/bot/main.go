@@ -28,10 +28,10 @@ func main() {
 			debug.SetMemoryLimit(int64(mb) * 1024 * 1024)
 		}
 	} else if os.Getenv("GOMEMLIMIT") == "" {
-		// Default conservative limit for 512MB dynos to prevent R14 swap
-		debug.SetMemoryLimit(380 * 1024 * 1024)
+		// Default 1600MB memory ceiling for 2GB containers (leaving 448MB for OS/network buffers)
+		debug.SetMemoryLimit(1600 * 1024 * 1024)
 	}
-	debug.SetGCPercent(50)
+	debug.SetGCPercent(100)
 
 	// 1. Structured logging setup
 	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{

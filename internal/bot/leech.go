@@ -328,7 +328,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			upload := uploader.NewUpload(filename, pw, totalSize)
-			u := uploader.NewUploader(worker.API).WithThreads(4).WithPartSize(512 * 1024)
+			u := uploader.NewUploader(worker.API).WithThreads(8).WithPartSize(512 * 1024)
 			inputFile, upErr := u.Upload(ctx, upload)
 			_ = dlResp.Body.Close()
 
@@ -526,7 +526,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 						}
 
 						upload := uploader.NewUpload(partFilename, pw, partLen)
-						u := uploader.NewUploader(w.API).WithThreads(4).WithPartSize(512 * 1024)
+						u := uploader.NewUploader(w.API).WithThreads(8).WithPartSize(512 * 1024)
 						inputFile, uploadErr := u.Upload(ctx, upload)
 						_ = pResp.Body.Close()
 
@@ -626,7 +626,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			upload := uploader.NewUpload(partFilename, pw, partLen)
-			u := uploader.NewUploader(worker.API).WithThreads(4).WithPartSize(512 * 1024)
+			u := uploader.NewUploader(worker.API).WithThreads(8).WithPartSize(512 * 1024)
 			inputFile, uploadErr := u.Upload(ctx, upload)
 			if uploadErr != nil || inputFile == nil {
 				slog.Warn("Upload stream slice failed", "part", partNum, "err", uploadErr)
