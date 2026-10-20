@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,8 +22,15 @@ import (
 )
 
 func main() {
-	// Configure aggressive memory ceiling for 512MB container dynos to prevent R14 swap
-	debug.SetMemoryLimit(350 * 1024 * 1024) // 350 MB
+	// Configure memory ceiling: respect GOMEMLIMIT or MEMORY_LIMIT_MB env vars
+	if memLimitEnv := os.Getenv("MEMORY_LIMIT_MB"); memLimitEnv != "" {
+		if mb, err := strconv.Atoi(memLimitEnv); err == nil && mb > 0 {
+			debug.SetMemoryLimit(int64(mb) * 1024 * 1024)
+		}
+	} else if os.Getenv("GOMEMLIMIT") == "" {
+		// Default conservative limit for 512MB dynos to prevent R14 swap
+		debug.SetMemoryLimit(380 * 1024 * 1024)
+	}
 	debug.SetGCPercent(50)
 
 	// 1. Structured logging setup
