@@ -3,9 +3,11 @@ package stream
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"sync"
+	"time"
 
 	"f2l/internal/cache"
 	"f2l/internal/telegram"
@@ -215,7 +217,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// Network fetch via this worker bot
+				// Network fetch via this worker bot with retry fallback
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -224,16 +226,29 @@ func (e *FastStreamEngine) StreamFileRange(
 					Precise:  true,
 				}
 
-				res, err := workerBot.API.UploadGetFile(workerCtx, req)
-				if err != nil && !workerBot.IsPrimary {
-					// Fallback to primary bot on error
-					if primary := e.pool.Primary(); primary != nil {
-						res, err = primary.API.UploadGetFile(workerCtx, req)
+				var res tg.UploadFileClass
+				var fetchErr error
+				for attempt := 1; attempt <= 2; attempt++ {
+					botToUse := workerBot
+					if attempt > 1 {
+						if primary := e.pool.Primary(); primary != nil {
+							botToUse = primary
+						}
+						time.Sleep(300 * time.Millisecond)
+					}
+					if botToUse == nil {
+						fetchErr = fmt.Errorf("no bot available")
+						break
+					}
+					res, fetchErr = botToUse.API.UploadGetFile(workerCtx, req)
+					if fetchErr == nil && res != nil {
+						break
 					}
 				}
-				if err != nil {
+				if fetchErr != nil || res == nil {
+					slog.Error("UploadGetFile failed after retries", "chunk", curOffsetChunk, "err", fetchErr)
 					select {
-					case resultChan <- chunkItem{index: idx, err: err}:
+					case resultChan <- chunkItem{index: idx, err: fetchErr}:
 					case <-workerCtx.Done():
 					}
 					return
