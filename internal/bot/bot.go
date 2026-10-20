@@ -134,7 +134,7 @@ func (b *Bot) registerHandlers() {
 				b.handleMerge(ctx, userPeer, msg.ID, replyTargetID, parts[1:])
 				return nil
 			case "/leech", "/download", "/fetch":
-				go b.handleLeech(ctx, userPeer, msg.ID, parts[1:])
+				go b.handleLeech(context.Background(), userPeer, msg.ID, parts[1:])
 				return nil
 			}
 		}
@@ -242,19 +242,9 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 		return
 	}
 
-	channelMsgID := 0
-	if updates, ok := fwdRes.(*tg.Updates); ok {
-		for _, upd := range updates.Updates {
-			if nu, ok := upd.(*tg.UpdateNewChannelMessage); ok {
-				if m, ok := nu.Message.(*tg.Message); ok {
-					channelMsgID = m.ID
-					break
-				}
-			}
-		}
-	}
-
+	channelMsgID := extractMsgID(fwdRes)
 	if channelMsgID == 0 {
+		slog.Error("Could not resolve forwarded message ID in storage channel", "res_type", fmt.Sprintf("%T", fwdRes))
 		return
 	}
 
@@ -319,18 +309,7 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 		return
 	}
 
-	startID := 0
-	if updates, ok := fwdRes.(*tg.Updates); ok {
-		for _, upd := range updates.Updates {
-			if nu, ok := upd.(*tg.UpdateNewChannelMessage); ok {
-				if m, ok := nu.Message.(*tg.Message); ok {
-					startID = m.ID
-					break
-				}
-			}
-		}
-	}
-
+	startID := extractMsgID(fwdRes)
 	if startID == 0 {
 		b.replyText(ctx, peer, replyToID, "❌ Could not resolve start message ID in channel.")
 		return
@@ -475,16 +454,11 @@ func (b *Bot) sendReply(ctx context.Context, peer tg.InputPeerClass, replyToID i
 	if err != nil {
 		return 0, err
 	}
-	if updates, ok := res.(*tg.Updates); ok {
-		for _, upd := range updates.Updates {
-			if nu, ok := upd.(*tg.UpdateNewMessage); ok {
-				if m, ok := nu.Message.(*tg.Message); ok {
-					return m.ID, nil
-				}
-			}
-		}
+	msgID := extractMsgID(res)
+	if msgID == 0 {
+		slog.Warn("Failed to extract message ID from sendReply result", "res_type", fmt.Sprintf("%T", res))
 	}
-	return 0, nil
+	return msgID, nil
 }
 
 func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int, text string) {
@@ -493,12 +467,15 @@ func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int,
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+	_, err := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 		Peer:     peer,
 		ID:       msgID,
 		Message:  cleanMsg,
 		Entities: entities,
 	})
+	if err != nil {
+		slog.Warn("Failed to edit status message", "msgID", msgID, "error", err)
+	}
 }
 
 func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) {
@@ -516,11 +493,57 @@ func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, 
 	})
 	if err != nil {
 		slog.Warn("Failed to edit message with markup, falling back to clean text", "error", err)
-		_, _ = primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 			Peer:     peer,
 			ID:       msgID,
 			Message:  cleanMsg,
 			Entities: entities,
 		})
+		if editErr != nil {
+			slog.Warn("Failed to edit message fallback clean text", "msgID", msgID, "error", editErr)
+		}
 	}
+}
+
+func extractUpdateMsgID(u tg.UpdateClass) int {
+	switch upd := u.(type) {
+	case *tg.UpdateNewMessage:
+		if upd.Message != nil {
+			return upd.Message.GetID()
+		}
+	case *tg.UpdateNewChannelMessage:
+		if upd.Message != nil {
+			return upd.Message.GetID()
+		}
+	}
+	return 0
+}
+
+func extractMsgID(res tg.UpdatesClass) int {
+	if res == nil {
+		return 0
+	}
+	switch u := res.(type) {
+	case *tg.UpdateShortSentMessage:
+		return u.ID
+	case *tg.UpdateShortChatMessage:
+		return u.ID
+	case *tg.UpdateShortMessage:
+		return u.ID
+	case *tg.UpdateShort:
+		return extractUpdateMsgID(u.Update)
+	case *tg.Updates:
+		for _, upd := range u.Updates {
+			if id := extractUpdateMsgID(upd); id > 0 {
+				return id
+			}
+		}
+	case *tg.UpdatesCombined:
+		for _, upd := range u.Updates {
+			if id := extractUpdateMsgID(upd); id > 0 {
+				return id
+			}
+		}
+	}
+	return 0
 }

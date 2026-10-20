@@ -103,6 +103,10 @@ func (s *Server) setupRoutes() {
 	r.Get("/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 	r.Get("/stream/v/{batch_id}/{filename}", s.handleVirtualWebPlayer)
 
+	// Stremio Add-on Endpoints
+	r.Get("/stremio/manifest.json", s.handleStremioManifest)
+	r.Get("/stremio/stream/{type}/{id}.json", s.handleStremioStream)
+
 	// Static Assets (Embedded JPlayer dist)
 	s.registerStaticRoutes()
 }
@@ -431,4 +435,45 @@ func parseRange(rangeHdr string, fileSize int64) (start, end int64, status int, 
 	}
 
 	return start, end, http.StatusPartialContent, nil
+}
+
+func (s *Server) handleStremioManifest(w http.ResponseWriter, r *http.Request) {
+	manifest := map[string]any{
+		"id":          "org.iseshu.f2l",
+		"version":     "1.0.0",
+		"name":        "F2L Telegram Streamer",
+		"description": "Stream Telegram videos directly in Stremio with zero latency and full 4K HDR & 5.1 Dolby audio support.",
+		"resources":   []string{"stream"},
+		"types":       []string{"movie", "series", "other"},
+		"catalogs":    []any{},
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	_ = json.NewEncoder(w).Encode(manifest)
+}
+
+func (s *Server) handleStremioStream(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	baseURL := s.getBaseURL(r)
+
+	var streamURL string
+	if strings.HasPrefix(id, "v_") {
+		batchID := strings.TrimPrefix(id, "v_")
+		streamURL = fmt.Sprintf("%s/inline/v/%s/stream.mkv", baseURL, batchID)
+	} else {
+		streamURL = fmt.Sprintf("%s/inline/%s/stream.mkv", baseURL, id)
+	}
+
+	res := map[string]any{
+		"streams": []map[string]any{
+			{
+				"name":  "⚡ F2L Fast Stream",
+				"title": "Telegram MTProto Stream\nRFC 7233 Byte-Range",
+				"url":   streamURL,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	_ = json.NewEncoder(w).Encode(res)
 }
