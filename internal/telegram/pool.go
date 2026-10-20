@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -66,13 +65,10 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	// Ensure data directory for session storage
 	_ = os.MkdirAll("data", 0755)
 
-	// 1. Initialize Primary Bot with persistent session storage
-	sessionPath := filepath.Join("data", "session.json")
+	// 1. Initialize Primary Bot with in-memory session
 	primaryOpts := telegram.Options{
-		SessionStorage: &session.FileStorage{
-			Path: sessionPath,
-		},
-		UpdateHandler: dispatcher,
+		SessionStorage: &session.StorageMemory{},
+		UpdateHandler:  dispatcher,
 	}
 
 	primaryClient := telegram.NewClient(p.cfg.Telegram.APIID, p.cfg.Telegram.APIHash, primaryOpts)
@@ -89,14 +85,8 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	go func() {
 		err := primaryClient.Run(ctx, func(runCtx context.Context) error {
 			slog.Info("Authenticating primary bot token...")
-			status, err := primaryClient.Auth().Status(runCtx)
-			if err != nil {
-				return fmt.Errorf("check primary auth status: %w", err)
-			}
-			if !status.Authorized {
-				if _, err := primaryClient.Auth().Bot(runCtx, p.cfg.Telegram.BotToken); err != nil {
-					return fmt.Errorf("primary bot auth failed: %w", err)
-				}
+			if _, err := primaryClient.Auth().Bot(runCtx, p.cfg.Telegram.BotToken); err != nil {
+				return fmt.Errorf("primary bot auth failed: %w", err)
 			}
 
 			self, err := primaryClient.Self(runCtx)
