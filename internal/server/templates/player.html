@@ -267,6 +267,76 @@
     }
 
     /* 1-Click External App Launchers */
+    .mobile-quick-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px 18px;
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.12) 0%, rgba(139, 92, 246, 0.12) 100%);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 14px;
+      backdrop-filter: blur(10px);
+    }
+
+    .quick-bar-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.88rem;
+      color: var(--text-primary);
+      line-height: 1.4;
+    }
+
+    .quick-bar-buttons {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    .btn-quick-app {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 0.85rem;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .btn-quick-app.btn-vlc {
+      background: rgba(255, 136, 0, 0.2);
+      color: #ffaa44;
+      border-color: rgba(255, 136, 0, 0.4);
+    }
+    .btn-quick-app.btn-vlc:hover {
+      background: rgba(255, 136, 0, 0.35);
+      transform: translateY(-2px);
+    }
+
+    .btn-quick-app.btn-mx {
+      background: rgba(139, 92, 246, 0.2);
+      color: #c4b5fd;
+      border-color: rgba(139, 92, 246, 0.4);
+    }
+    .btn-quick-app.btn-mx:hover {
+      background: rgba(139, 92, 246, 0.35);
+      transform: translateY(-2px);
+    }
+
+    .btn-quick-app.btn-chooser {
+      background: rgba(59, 130, 246, 0.2);
+      color: #93c5fd;
+      border-color: rgba(59, 130, 246, 0.4);
+    }
+    .btn-quick-app.btn-chooser:hover {
+      background: rgba(59, 130, 246, 0.35);
+      transform: translateY(-2px);
+    }
+
     .launchers-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -553,6 +623,25 @@
     <main class="player-wrapper">
       {{ mediaContainer }}
     </main>
+
+    <!-- Quick App Launch Bar (Instant Hardware Decoding for Mobile / 4K / MKV) -->
+    <div class="mobile-quick-bar">
+      <div class="quick-bar-header">
+        <i class="fa-solid fa-bolt" style="color: #60a5fa;"></i>
+        <span><strong>Mobile Streaming Tip:</strong> 4K AV1 & Dolby 5.1 lag in mobile browsers. For instant, 100% smooth playback, open directly in:</span>
+      </div>
+      <div class="quick-bar-buttons">
+        <button class="btn-quick-app btn-vlc" onclick="openInVLC()">
+          <i class="fa-brands fa-vlc"></i> Play in VLC
+        </button>
+        <button class="btn-quick-app btn-mx" onclick="openInMXPlayer()">
+          <i class="fa-solid fa-play"></i> MX Player
+        </button>
+        <button class="btn-quick-app btn-chooser" onclick="openInAnyApp()">
+          <i class="fa-solid fa-arrow-up-right-from-square"></i> Open in Video App
+        </button>
+      </div>
+    </div>
 
     <!-- JPlayer Cinema Pro Tools Bar -->
     <section class="cinema-tools-bar">
@@ -934,11 +1023,31 @@
       }
     }
 
-    // 1-Click Launchers
+    // Android Intent & 1-Click App Launchers
+    function getAndroidIntent(pkg, fallbackUrl) {
+      const cleanLink = mediaLink.replace(/^https?:\/\//, '');
+      const scheme = mediaLink.startsWith('https') ? 'https' : 'http';
+      let intent = `intent://${cleanLink}#Intent;scheme=${scheme};type=video/*;`;
+      if (pkg) {
+        intent += `package=${pkg};`;
+      }
+      if (fallbackUrl) {
+        intent += `S.browser_fallback_url=${encodeURIComponent(fallbackUrl)};`;
+      }
+      intent += 'end;';
+      return intent;
+    }
+
     function openInVLC() {
       const isAndroid = /Android/i.test(navigator.userAgent);
+      const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
       if (isAndroid) {
-        window.location.href = 'intent:' + mediaLink + '#Intent;package=org.videolan.vlc;type=video/*;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dorg.videolan.vlc;end';
+        window.location.href = getAndroidIntent('org.videolan.vlc', 'https://play.google.com/store/apps/details?id=org.videolan.vlc');
+      } else if (isIOS) {
+        window.location.href = 'vlc-x-callback://x-callback-url/stream?url=' + encodeURIComponent(mediaLink);
+        setTimeout(() => {
+          window.location.href = 'vlc://' + mediaLink;
+        }, 800);
       } else {
         window.location.href = 'vlc://' + mediaLink;
       }
@@ -946,8 +1055,23 @@
     }
 
     function openInMXPlayer() {
-      window.location.href = 'intent:' + mediaLink + '#Intent;package=com.mxtech.videoplayer.ad;type=video/*;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.mxtech.videoplayer.ad;end';
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      if (isAndroid) {
+        window.location.href = getAndroidIntent('com.mxtech.videoplayer.ad', 'https://play.google.com/store/apps/details?id=com.mxtech.videoplayer.ad');
+      } else {
+        window.location.href = mediaLink;
+      }
       showToast('Launching MX Player...');
+    }
+
+    function openInAnyApp() {
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      if (isAndroid) {
+        window.location.href = getAndroidIntent('', '');
+        showToast('Opening in Video Player...');
+      } else {
+        openInVLC();
+      }
     }
 
     function openInPotPlayer() {
