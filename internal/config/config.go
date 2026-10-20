@@ -146,8 +146,8 @@ func Load() *Config {
 		},
 		Stream: StreamConfig{
 			ChunkSize:      1024 * 1024, // 1 MB (Telegram MTProto hard limit)
-			PrefetchChunks: getEnvInt("PREFETCH_CHUNKS", 8),
-			CacheSizeMB:    getEnvInt("CACHE_SIZE_MB", 256),
+			PrefetchChunks: getEnvInt("PREFETCH_CHUNKS", 4),
+			CacheSizeMB:    getEnvInt("CACHE_SIZE_MB", 64),
 			CacheTTLSec:    getEnvInt("CACHE_TTL_SEC", 1800),
 		},
 	}

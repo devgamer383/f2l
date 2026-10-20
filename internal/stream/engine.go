@@ -143,36 +143,58 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	primary := e.pool.Primary()
-	if primary == nil || !primary.IsReady.Load() {
+	workers := e.pool.GetAvailableWorkers()
+	if len(workers) == 0 {
 		return fmt.Errorf("bot pool not ready")
 	}
-	api := primary.API
+	numBots := len(workers)
 
-	// Determine worker concurrency for parallel chunk download
-	concurrency := 4
-	if e.prefetch > concurrency {
-		concurrency = e.prefetch
+	// Bounded prefetch window: at most 4 chunks (4 MB) in flight to protect memory
+	prefetch := 4
+	if e.prefetch > 0 && e.prefetch < 6 {
+		prefetch = e.prefetch
 	}
-	if chunksToStream < concurrency {
-		concurrency = chunksToStream
+	if chunksToStream < prefetch {
+		prefetch = chunksToStream
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	taskChan := make(chan int, chunksToStream)
-	resultChan := make(chan chunkItem, e.prefetch*2)
-
-	for i := 0; i < chunksToStream; i++ {
-		taskChan <- i
+	// Sliding window feeder:
+	// feedSignal grants permission to queue exactly 1 chunk ahead into taskChan.
+	// Initial capacity is prefetch tokens.
+	feedSignal := make(chan struct{}, prefetch)
+	for i := 0; i < prefetch; i++ {
+		feedSignal <- struct{}{}
 	}
-	close(taskChan)
 
+	taskChan := make(chan int, prefetch)
+	go func() {
+		defer close(taskChan)
+		for nextChunk := 0; nextChunk < chunksToStream; nextChunk++ {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-feedSignal:
+				select {
+				case <-workerCtx.Done():
+					return
+				case taskChan <- nextChunk:
+				}
+			}
+		}
+	}()
+
+	resultChan := make(chan chunkItem, prefetch*2)
 	var wg sync.WaitGroup
-	for w := 0; w < concurrency; w++ {
+
+	// Concurrency equals prefetch (multi-bot distributed)
+	concurrency := prefetch
+	for wIdx := 0; wIdx < concurrency; wIdx++ {
+		botClient := workers[wIdx%numBots]
 		wg.Add(1)
-		go func() {
+		go func(workerBot *telegram.WorkerClient) {
 			defer wg.Done()
 			for idx := range taskChan {
 				select {
@@ -193,7 +215,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// Network fetch
+				// Network fetch via this worker bot
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -202,7 +224,13 @@ func (e *FastStreamEngine) StreamFileRange(
 					Precise:  true,
 				}
 
-				res, err := api.UploadGetFile(workerCtx, req)
+				res, err := workerBot.API.UploadGetFile(workerCtx, req)
+				if err != nil && !workerBot.IsPrimary {
+					// Fallback to primary bot on error
+					if primary := e.pool.Primary(); primary != nil {
+						res, err = primary.API.UploadGetFile(workerCtx, req)
+					}
+				}
 				if err != nil {
 					select {
 					case resultChan <- chunkItem{index: idx, err: err}:
@@ -238,7 +266,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					return
 				}
 			}
-		}()
+		}(botClient)
 	}
 
 	// Close resultChan when all workers finish
@@ -288,6 +316,12 @@ func (e *FastStreamEngine) StreamFileRange(
 			}
 
 			expectedIdx++
+
+			// Signal feeder to allow the next chunk into the prefetch window
+			select {
+			case feedSignal <- struct{}{}:
+			default:
+			}
 			continue
 		}
 
