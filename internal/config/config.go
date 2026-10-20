@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"os"
 	"strconv"
 	"strings"
@@ -62,7 +63,33 @@ func getEnvInt64(key string, defaultVal int64) int64 {
 	return defaultVal
 }
 
+func loadDotEnv() {
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			v = strings.Trim(v, `"'`)
+			if os.Getenv(k) == "" {
+				_ = os.Setenv(k, v)
+			}
+		}
+	}
+}
+
 func Load() *Config {
+	loadDotEnv()
 	apiID := getEnvInt("TELEGRAM_API_ID", 0)
 	if apiID == 0 {
 		apiID = getEnvInt("API_ID", 0)
@@ -126,6 +153,9 @@ func Load() *Config {
 	}
 
 	port := getEnvInt("PORT", 8080)
+	if sp := getEnvInt("SERVER_PORT", 0); sp > 0 {
+		port = sp
+	}
 
 	return &Config{
 		Telegram: TelegramConfig{
