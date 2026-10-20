@@ -437,7 +437,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		totalDownloaded atomic.Int64
 		totalUploaded   atomic.Int64
 		dlStart         = time.Now()
-		upStart         = time.Now()
+		upStart         time.Time
+		upOnce          sync.Once
 	)
 
 	primary := b.pool.Primary()
@@ -458,8 +459,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		}
 		close(jobChan)
 
-		// Limit concurrent downloads to 2 parts at a time to keep Heroku disk usage safe (< 3.8 GB)
-		downloadSem := make(chan struct{}, 2)
+		// Utilize all available worker bots in parallel for maximum upload speed
+		downloadSem := make(chan struct{}, activeWorkers)
 
 		var wg sync.WaitGroup
 		for wIdx := 0; wIdx < activeWorkers; wIdx++ {
@@ -526,6 +527,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 						// Upload to Telegram with progress tracker
 						partTracker := &uploadProgressTracker{
 							onProgress: func(n int64) {
+								upOnce.Do(func() { upStart = time.Now() })
 								currUp := totalUploaded.Add(n)
 								pText := telegram.RenderProgress("📤 **Multi-Bot Parallel Upload**", cleanName, currUp, totalSize, upStart,
 									fmt.Sprintf("Part %d/%d | %d Bots active", partNum, numParts, activeWorkers))
@@ -665,6 +667,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 				partTracker := &uploadProgressTracker{
 					onProgress: func(bytesUploaded int64) {
+						upOnce.Do(func() { upStart = time.Now() })
 						currUp := totalUploaded.Add(bytesUploaded)
 						pText := telegram.RenderProgress("📤 **Multi-Bot Parallel Upload**", cleanName, currUp, totalSize, upStart,
 							fmt.Sprintf("Part %d/%d | %d Bots active", pNum, numParts, activeWorkers))
