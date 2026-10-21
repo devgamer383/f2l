@@ -210,14 +210,16 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	// Select ready client: Primary bot has the authenticated MTProto session
-	botClient := e.pool.Primary()
-	if botClient == nil || !botClient.IsReady.Load() {
-		botClient = e.pool.NextWorker()
+	// Distribute streaming across all connected worker bots in the pool
+	workers := e.pool.GetAvailableWorkers()
+	if len(workers) == 0 {
+		if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
+			workers = []*telegram.WorkerClient{primary}
+		} else {
+			return fmt.Errorf("no ready telegram client available")
+		}
 	}
-	if botClient == nil {
-		return fmt.Errorf("no ready telegram client available")
-	}
+	numBots := len(workers)
 
 	concurrency := 8
 	if e.prefetch >= 2 && e.prefetch <= 16 {
@@ -236,15 +238,27 @@ func (e *FastStreamEngine) StreamFileRange(
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	// Task channel with bounded buffer for smooth continuous prefetching ahead of the player
-	taskChan := make(chan int, concurrency*2)
+	// Sliding window feeder:
+	// feedSignal grants permission to queue exactly 1 chunk ahead into taskChan.
+	// Bounded concurrency keeps memory usage constant and prevents buffer stalls.
+	feedSignal := make(chan struct{}, concurrency)
+	for i := 0; i < concurrency; i++ {
+		feedSignal <- struct{}{}
+	}
+
+	taskChan := make(chan int, concurrency)
 	go func() {
 		defer close(taskChan)
 		for nextChunk := 0; nextChunk < chunksToStream; nextChunk++ {
 			select {
 			case <-workerCtx.Done():
 				return
-			case taskChan <- nextChunk:
+			case <-feedSignal:
+				select {
+				case <-workerCtx.Done():
+					return
+				case taskChan <- nextChunk:
+				}
 			}
 		}
 	}()
@@ -252,10 +266,11 @@ func (e *FastStreamEngine) StreamFileRange(
 	resultChan := make(chan streamChunk, concurrency*2)
 	var wg sync.WaitGroup
 
-	// Pipelined workers: multiplex multiple in-flight chunk requests on the warm primary connection
-	for w := 0; w < concurrency; w++ {
+	// Multi-bot distributed workers: parallel chunk downloads across all worker sessions
+	for wIdx := 0; wIdx < concurrency; wIdx++ {
+		assignedBot := workers[wIdx%numBots]
 		wg.Add(1)
-		go func() {
+		go func(workerBot *telegram.WorkerClient) {
 			defer wg.Done()
 			for idx := range taskChan {
 				select {
@@ -276,7 +291,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// 2. Fetch chunk from Telegram MTProto on warm persistent connection
+				// 2. Fetch chunk from Telegram MTProto on assigned worker connection
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -288,41 +303,52 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				activeClient := botClient
-				for attempt := 1; attempt <= 4; attempt++ {
-					res, fetchErr = activeClient.GetAPI().UploadGetFile(workerCtx, req)
-					if fetchErr == nil && res != nil {
-						botClient = activeClient
-						break
+				activeClient := workerBot
+				for attempt := 1; attempt <= 3; attempt++ {
+					if activeClient == nil || !activeClient.IsReady.Load() || activeClient.GetAPI() == nil {
+						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
+							activeClient = primary
+						} else if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
+							activeClient = next
+						}
+					}
+					if activeClient != nil && activeClient.GetAPI() != nil {
+						res, fetchErr = activeClient.GetAPI().UploadGetFile(workerCtx, req)
+						if fetchErr == nil && res != nil {
+							break
+						}
+					} else {
+						fetchErr = fmt.Errorf("no ready bot client")
 					}
 					if workerCtx.Err() != nil {
 						return
 					}
 
 					// Auto-refresh expired Telegram file references directly for activeClient
-					if strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
+					if fetchErr != nil && strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
 						slog.Info("Telegram file reference expired, fetching fresh reference...", "file_id", fileID, "bot_id", activeClient.ID, "chunk", curOffsetChunk)
 						freshProps, refErr := e.RefreshFilePropertiesClient(workerCtx, activeClient, fileID)
 						if refErr == nil && freshProps != nil && freshProps.Location != nil {
 							req.Location = freshProps.Location
 							props.Location = freshProps.Location
 							props.Doc = freshProps.Doc
-							// Retry immediately with the same client that holds the fresh reference
+							// Retry immediately with fresh reference
 							continue
 						}
 					}
 
-					// If engine forcibly closed or client disconnected, rotate to next ready worker
-					if strings.Contains(fetchErr.Error(), "engine forcibly closed") || !activeClient.IsReady.Load() {
+					// Rotate to primary bot or another ready worker on retry
+					if attempt == 1 {
+						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() && primary != activeClient {
+							activeClient = primary
+						}
+					} else {
 						if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
 							activeClient = next
-							if freshProps, refErr := e.RefreshFilePropertiesClient(workerCtx, activeClient, fileID); refErr == nil && freshProps != nil && freshProps.Location != nil {
-								req.Location = freshProps.Location
-							}
 						}
 					}
 
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 				}
 
 				if fetchErr != nil || res == nil {
@@ -363,7 +389,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					return
 				}
 			}
-		}()
+		}(assignedBot)
 	}
 
 	go func() {
@@ -412,6 +438,12 @@ func (e *FastStreamEngine) StreamFileRange(
 			}
 
 			expectedIdx++
+
+			// Signal feeder to allow the next chunk into the prefetch window
+			select {
+			case feedSignal <- struct{}{}:
+			default:
+			}
 			continue
 		}
 

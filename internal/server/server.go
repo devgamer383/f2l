@@ -210,7 +210,7 @@ func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 
 		if r.Method == "HEAD" {
 			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
@@ -338,7 +338,7 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 
 		if r.Method == "HEAD" {
 			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
