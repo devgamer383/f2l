@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,19 +218,27 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				for attempt := 1; attempt <= 3; attempt++ {
-					res, fetchErr = botClient.API.UploadGetFile(workerCtx, req)
+				activeClient := botClient
+				for attempt := 1; attempt <= 4; attempt++ {
+					if attempt > 1 || !activeClient.IsReady.Load() {
+						if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
+							activeClient = next
+						}
+					}
+
+					res, fetchErr = activeClient.API.UploadGetFile(workerCtx, req)
 					if fetchErr == nil && res != nil {
+						botClient = activeClient
 						break
 					}
 					if workerCtx.Err() != nil {
 						return
 					}
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(150 * time.Millisecond)
 				}
 
 				if fetchErr != nil || res == nil {
-					if workerCtx.Err() == nil {
+					if workerCtx.Err() == nil && !strings.Contains(fetchErr.Error(), "context canceled") {
 						slog.Warn("UploadGetFile failed", "file_id", fileID, "chunk", curOffsetChunk, "err", fetchErr)
 						select {
 						case resultChan <- streamChunk{index: idx, err: fetchErr}:
