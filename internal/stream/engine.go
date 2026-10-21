@@ -210,19 +210,17 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	// Distribute streaming across all connected worker bots in the pool
-	workers := e.pool.GetAvailableWorkers()
-	if len(workers) == 0 {
-		if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
-			workers = []*telegram.WorkerClient{primary}
-		} else {
-			return fmt.Errorf("no ready telegram client available")
-		}
+	// Select ready client: Primary bot has the authenticated MTProto session
+	botClient := e.pool.Primary()
+	if botClient == nil || !botClient.IsReady.Load() {
+		botClient = e.pool.NextWorker()
 	}
-	numBots := len(workers)
+	if botClient == nil {
+		return fmt.Errorf("no ready telegram client available")
+	}
 
-	concurrency := 8
-	if e.prefetch >= 2 && e.prefetch <= 16 {
+	concurrency := 4
+	if e.prefetch >= 2 && e.prefetch <= 8 {
 		concurrency = e.prefetch
 	}
 	if chunksToStream < concurrency {
@@ -238,27 +236,15 @@ func (e *FastStreamEngine) StreamFileRange(
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	// Sliding window feeder:
-	// feedSignal grants permission to queue exactly 1 chunk ahead into taskChan.
-	// Bounded concurrency keeps memory usage constant and prevents buffer stalls.
-	feedSignal := make(chan struct{}, concurrency)
-	for i := 0; i < concurrency; i++ {
-		feedSignal <- struct{}{}
-	}
-
-	taskChan := make(chan int, concurrency)
+	// Task channel with bounded buffer for smooth continuous prefetching ahead of the player
+	taskChan := make(chan int, concurrency*2)
 	go func() {
 		defer close(taskChan)
 		for nextChunk := 0; nextChunk < chunksToStream; nextChunk++ {
 			select {
 			case <-workerCtx.Done():
 				return
-			case <-feedSignal:
-				select {
-				case <-workerCtx.Done():
-					return
-				case taskChan <- nextChunk:
-				}
+			case taskChan <- nextChunk:
 			}
 		}
 	}()
@@ -266,11 +252,10 @@ func (e *FastStreamEngine) StreamFileRange(
 	resultChan := make(chan streamChunk, concurrency*2)
 	var wg sync.WaitGroup
 
-	// Multi-bot distributed workers: parallel chunk downloads across all worker sessions
-	for wIdx := 0; wIdx < concurrency; wIdx++ {
-		assignedBot := workers[wIdx%numBots]
+	// Pipelined workers: multiplex multiple in-flight chunk requests on the warm primary connection
+	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
-		go func(workerBot *telegram.WorkerClient) {
+		go func() {
 			defer wg.Done()
 			for idx := range taskChan {
 				select {
@@ -291,7 +276,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// 2. Fetch chunk from Telegram MTProto on assigned worker connection
+				// 2. Fetch chunk from Telegram MTProto on warm persistent connection
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -303,7 +288,7 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				activeClient := workerBot
+				activeClient := botClient
 				for attempt := 1; attempt <= 3; attempt++ {
 					if activeClient == nil || !activeClient.IsReady.Load() || activeClient.GetAPI() == nil {
 						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
@@ -337,7 +322,7 @@ func (e *FastStreamEngine) StreamFileRange(
 						}
 					}
 
-					// Rotate to primary bot or another ready worker on retry
+					// Rotate on retry
 					if attempt == 1 {
 						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() && primary != activeClient {
 							activeClient = primary
@@ -389,7 +374,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					return
 				}
 			}
-		}(assignedBot)
+		}()
 	}
 
 	go func() {
@@ -438,12 +423,6 @@ func (e *FastStreamEngine) StreamFileRange(
 			}
 
 			expectedIdx++
-
-			// Signal feeder to allow the next chunk into the prefetch window
-			select {
-			case feedSignal <- struct{}{}:
-			default:
-			}
 			continue
 		}
 
