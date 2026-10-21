@@ -151,9 +151,6 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	}
 	slog.Info("Sent initial leech status message", "status_msg_id", statusMsgID)
 
-	leechDir := filepath.Join(DownDir, fmt.Sprintf("leech_%d_%d", time.Now().UnixNano(), randInt64()))
-	_ = os.MkdirAll(leechDir, 0755)
-	defer func() { _ = os.RemoveAll(leechDir) }()
 
 	client := &http.Client{
 		Timeout: 0, // No global timeout for large streaming transfers
@@ -328,7 +325,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			upload := uploader.NewUpload(filename, pw, totalSize)
-			u := uploader.NewUploader(worker.API).WithThreads(8).WithPartSize(512 * 1024)
+			u := uploader.NewUploader(worker.API).WithThreads(16).WithPartSize(512 * 1024)
 			inputFile, upErr := u.Upload(ctx, upload)
 			_ = dlResp.Body.Close()
 
@@ -526,7 +523,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 						}
 
 						upload := uploader.NewUpload(partFilename, pw, partLen)
-						u := uploader.NewUploader(w.API).WithThreads(8).WithPartSize(512 * 1024)
+						u := uploader.NewUploader(w.API).WithThreads(16).WithPartSize(512 * 1024)
 						inputFile, uploadErr := u.Upload(ctx, upload)
 						_ = pResp.Body.Close()
 
@@ -603,108 +600,40 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			partEnd := int64(math.Min(float64(totalSize-1), float64(int64(partIdx+1)*sliceSize-1)))
 			partLen := partEnd - partStart + 1
 			partFilename := fmt.Sprintf("%s.%03d", cleanName, partNum)
-			partPath := filepath.Join(leechDir, partFilename)
 
-			// 1. Download slice into local temporary buffer file
-			// Botkeep downloads at ~96 MB/s, so downloading 1.2 GB takes only ~12 seconds!
-			_ = os.Remove(partPath)
-			pf, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-			if err != nil {
-				slog.Error("Create slice file failed", "part", partNum, "err", err)
-				b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Failed to create local slice file: %s", err))
-				return
-			}
+			worker := availableWorkers[partIdx%numBots]
+			botTag := fmt.Sprintf("Bot %d/%d", worker.ID, numBots)
 
 			limitR := io.LimitReader(sResp.Body, partLen)
-			var currentPartDownloaded int64
-			dlPw := &progressReader{
+			var currentPartStreamed int64
+			pw := &progressReader{
 				r: limitR,
 				onProgress: func(n int64) {
 					streamOnce.Do(func() { streamStart = time.Now() })
-					currentPartDownloaded += n
+					currentPartStreamed += n
 					var curr int64
 					for i := 0; i < partIdx; i++ {
 						curr += partProgress[i].Load()
 					}
-					curr += currentPartDownloaded
-					pText := telegram.RenderProgress("📥 **Buffering Stream Slice**", cleanName, curr, totalSize, streamStart,
-						fmt.Sprintf("Part %d/%d (Buffering %s)", partNum, numParts, telegram.FormatBytes(partLen)))
+					curr += currentPartStreamed
+					pText := telegram.RenderProgress("⚡ **Zero-Disk Stream -> Telegram**", cleanName, curr, totalSize, streamStart,
+						fmt.Sprintf("Part %d/%d (%s)", partNum, numParts, botTag))
 					updateProgress(pText)
 				},
 			}
 
-			_, copyErr := io.Copy(pf, dlPw)
-			_ = pf.Close()
-			if copyErr != nil {
-				_ = os.Remove(partPath)
-				slog.Warn("Download stream slice failed", "part", partNum, "err", copyErr)
-				b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Stream slice %d download failed: %s", partNum, copyErr))
-				return
-			}
-
-			// 2. Upload slice to Telegram with up to 4 retries across available worker bots
-			var (
-				inputFile tg.InputFileClass
-				worker    *telegram.WorkerClient
-				uploadErr error
-			)
-
-			for attempt := 1; attempt <= 4; attempt++ {
-				worker = availableWorkers[(partIdx+attempt-1)%numBots]
-				botTag := fmt.Sprintf("Bot %d/%d", worker.ID, numBots)
-
-				fUpload, fErr := os.Open(partPath)
-				if fErr != nil {
-					uploadErr = fErr
-					break
-				}
-
-				var currentPartUploaded int64
-				upPw := &progressReader{
-					r: fUpload,
-					onProgress: func(n int64) {
-						currentPartUploaded += n
-						var curr int64
-						for i := 0; i < partIdx; i++ {
-							curr += partProgress[i].Load()
-						}
-						curr += currentPartUploaded
-						pText := telegram.RenderProgress("⚡ **Uploading Slice to Telegram**", cleanName, curr, totalSize, streamStart,
-							fmt.Sprintf("Part %d/%d (%s, Attempt %d)", partNum, numParts, botTag, attempt))
-						updateProgress(pText)
-					},
-				}
-
-				upload := uploader.NewUpload(partFilename, upPw, partLen)
-				u := uploader.NewUploader(worker.API).WithThreads(8).WithPartSize(512 * 1024)
-				inputFile, uploadErr = u.Upload(ctx, upload)
-				_ = fUpload.Close()
-
-				if uploadErr == nil && inputFile != nil {
-					break
-				}
-
-				slog.Warn("Upload slice failed, retrying with next worker...", "part", partNum, "attempt", attempt, "worker", worker.ID, "err", uploadErr)
-				select {
-				case <-time.After(3 * time.Second):
-				case <-ctx.Done():
-					_ = os.Remove(partPath)
-					return
-				}
-			}
-
-			// Clean up local slice file from disk immediately after upload completes
-			_ = os.Remove(partPath)
-
+			upload := uploader.NewUpload(partFilename, pw, partLen)
+			u := uploader.NewUploader(worker.API).WithThreads(16).WithPartSize(512 * 1024)
+			inputFile, uploadErr := u.Upload(ctx, upload)
 			if uploadErr != nil || inputFile == nil {
-				slog.Warn("Upload stream slice failed after retries", "part", partNum, "err", uploadErr)
-				b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Stream slice %d failed after retries: %s", partNum, uploadErr))
+				slog.Warn("Upload stream slice failed", "part", partNum, "err", uploadErr)
+				b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Stream slice %d failed: %s", partNum, uploadErr))
 				return
 			}
 
 			partProgress[partIdx].Store(partLen)
 
-			// 3. Send media to storage channel with retries
+			// 2. Send media to storage channel with retries
 			var (
 				sRes    tg.UpdatesClass
 				sendErr error

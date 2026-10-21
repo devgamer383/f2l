@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"syscall"
@@ -32,6 +33,16 @@ func main() {
 		debug.SetMemoryLimit(1600 * 1024 * 1024)
 	}
 	debug.SetGCPercent(100)
+
+	// Ensure clean workspace on startup: remove downloads and any stale large files
+	_ = os.RemoveAll("downloads")
+	_ = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && info.Size() > 100*1024*1024 {
+			slog.Info("Removing large stale file", "path", path, "size_mb", info.Size()/(1024*1024))
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 
 	// 1. Structured logging setup
 	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
