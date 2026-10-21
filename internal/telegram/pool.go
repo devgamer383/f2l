@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"f2l/internal/config"
 
@@ -81,39 +82,48 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	}
 	p.workers = append(p.workers, p.primary)
 
-	// Launch primary bot in background
+	// Launch primary bot in background with auto-reconnection loop
 	go func() {
-		err := primaryClient.Run(ctx, func(runCtx context.Context) error {
-			slog.Info("Authenticating primary bot token...")
-			if _, err := primaryClient.Auth().Bot(runCtx, p.cfg.Telegram.BotToken); err != nil {
-				return fmt.Errorf("primary bot auth failed: %w", err)
-			}
+		for {
+			err := primaryClient.Run(ctx, func(runCtx context.Context) error {
+				slog.Info("Authenticating primary bot token...")
+				if _, err := primaryClient.Auth().Bot(runCtx, p.cfg.Telegram.BotToken); err != nil {
+					return fmt.Errorf("primary bot auth failed: %w", err)
+				}
 
-			self, err := primaryClient.Self(runCtx)
-			if err != nil {
-				return fmt.Errorf("get primary self: %w", err)
-			}
-			slog.Info("✅ Primary bot logged in as @" + self.Username)
+				self, err := primaryClient.Self(runCtx)
+				if err != nil {
+					return fmt.Errorf("get primary self: %w", err)
+				}
+				slog.Info("✅ Primary bot logged in as @" + self.Username)
 
-			// Resolve storage channel
-			if _, err := p.resolver.GetInputChannel(runCtx, primaryClient.API()); err != nil {
-				slog.Warn("Could not resolve storage channel on startup", "error", err)
-			}
+				// Resolve storage channel
+				if _, err := p.resolver.GetInputChannel(runCtx, primaryClient.API()); err != nil {
+					slog.Warn("Could not resolve storage channel on startup", "error", err)
+				}
 
-			p.primary.IsReady.Store(true)
-			p.readyOnce.Do(func() {
-				close(p.readySignal)
+				p.primary.IsReady.Store(true)
+				p.readyOnce.Do(func() {
+					close(p.readySignal)
+				})
+
+				<-runCtx.Done()
+				return nil
 			})
-
-			<-runCtx.Done()
-			return nil
-		})
-		if err != nil && ctx.Err() == nil {
-			slog.Error("Primary bot crashed", "error", err)
+			p.primary.IsReady.Store(false)
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("Primary bot connection dropped, reconnecting in 3s...", "error", err)
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
-	// 2. Initialize Secondary Worker Bots (in-memory sessions for upload acceleration)
+	// 2. Initialize Secondary Worker Bots (in-memory sessions with auto-reconnection loops)
 	for i, token := range p.cfg.Telegram.SecondaryBotTokens {
 		workerID := i + 1
 		workerToken := token
@@ -135,23 +145,32 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 		p.mu.Unlock()
 
 		go func(w *WorkerClient, tok string) {
-			err := w.Client.Run(ctx, func(runCtx context.Context) error {
-				slog.Info("Authenticating secondary worker...", "id", w.ID)
-				if _, err := w.Client.Auth().Bot(runCtx, tok); err != nil {
-					return fmt.Errorf("secondary worker %d auth: %w", w.ID, err)
+			for {
+				err := w.Client.Run(ctx, func(runCtx context.Context) error {
+					slog.Info("Authenticating secondary worker...", "id", w.ID)
+					if _, err := w.Client.Auth().Bot(runCtx, tok); err != nil {
+						return fmt.Errorf("secondary worker %d auth: %w", w.ID, err)
+					}
+					self, _ := w.Client.Self(runCtx)
+					username := ""
+					if self != nil {
+						username = self.Username
+					}
+					w.IsReady.Store(true)
+					slog.Info("✅ Secondary worker ready", "id", w.ID, "username", username)
+					<-runCtx.Done()
+					return nil
+				})
+				w.IsReady.Store(false)
+				if ctx.Err() != nil {
+					return
 				}
-				self, _ := w.Client.Self(runCtx)
-				username := ""
-				if self != nil {
-					username = self.Username
+				slog.Warn("Secondary worker connection dropped, reconnecting in 3s...", "id", w.ID, "error", err)
+				select {
+				case <-time.After(3 * time.Second):
+				case <-ctx.Done():
+					return
 				}
-				w.IsReady.Store(true)
-				slog.Info("✅ Secondary worker ready", "id", w.ID, "username", username)
-				<-runCtx.Done()
-				return nil
-			})
-			if err != nil && ctx.Err() == nil {
-				slog.Warn("Secondary worker failed", "id", w.ID, "error", err)
 			}
 		}(worker, workerToken)
 	}
