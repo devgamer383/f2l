@@ -124,6 +124,12 @@ func NewVirtualStreamEngine(fastStreamer *FastStreamEngine, pool *telegram.BotPo
 	}
 }
 
+func (v *VirtualStreamEngine) InvalidateBatch(batchToken string) {
+	v.metaMu.Lock()
+	delete(v.metaCache, batchToken)
+	v.metaMu.Unlock()
+}
+
 func (v *VirtualStreamEngine) GetVirtualMetadata(ctx context.Context, batchToken string) (*VirtualMetadata, error) {
 	v.metaMu.RLock()
 	if meta, found := v.metaCache[batchToken]; found {

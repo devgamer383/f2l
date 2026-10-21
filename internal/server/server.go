@@ -363,8 +363,13 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 		}
 
 		err = s.virtualStream.StreamVirtualRange(r.Context(), w, rawBatchID, start, end, contentLength)
-		if err != nil && r.Context().Err() == nil && !strings.Contains(err.Error(), "context canceled") {
-			slog.Error("Virtual stream error", "batch", rawBatchID, "error", err)
+		if err != nil {
+			if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
+				s.virtualStream.InvalidateBatch(rawBatchID)
+			}
+			if r.Context().Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+				slog.Error("Virtual stream error", "batch", rawBatchID, "error", err)
+			}
 		}
 	}
 }

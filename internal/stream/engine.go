@@ -97,6 +97,57 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 	return props, nil
 }
 
+// RefreshFileProperties bypasses the cache to fetch fresh FileReferences from Telegram
+func (e *FastStreamEngine) RefreshFileProperties(ctx context.Context, messageID int) (*telegram.FileProperties, error) {
+	primary := e.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		primary = e.pool.NextWorker()
+	}
+	if primary == nil {
+		return nil, fmt.Errorf("no ready telegram client available")
+	}
+
+	ch, err := e.pool.Resolver().GetInputChannel(ctx, primary.API)
+	if err != nil {
+		return nil, fmt.Errorf("resolve storage channel: %w", err)
+	}
+
+	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+		Channel: ch,
+		ID: []tg.InputMessageClass{
+			&tg.InputMessageID{ID: messageID},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("refresh message %d: %w", messageID, err)
+	}
+
+	modified, ok := res.AsModified()
+	if !ok {
+		return nil, fmt.Errorf("message %d returned unmodified", messageID)
+	}
+	messages := modified.GetMessages()
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("message %d not found", messageID)
+	}
+
+	msg, ok := messages[0].(*tg.Message)
+	if !ok {
+		return nil, fmt.Errorf("message %d is not a valid message", messageID)
+	}
+
+	props, err := telegram.GetFileProperties(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	e.msgCacheMu.Lock()
+	e.msgCache[messageID] = props
+	e.msgCacheMu.Unlock()
+
+	return props, nil
+}
+
 func (e *FastStreamEngine) StreamFileRange(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -234,6 +285,19 @@ func (e *FastStreamEngine) StreamFileRange(
 					if workerCtx.Err() != nil {
 						return
 					}
+
+					// Auto-refresh expired Telegram file references from channel
+					if strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
+						slog.Info("Telegram file reference expired, fetching fresh reference...", "file_id", fileID, "chunk", curOffsetChunk)
+						freshProps, refErr := e.RefreshFileProperties(workerCtx, fileID)
+						if refErr == nil && freshProps != nil && freshProps.Location != nil {
+							req.Location = freshProps.Location
+							props.Location = freshProps.Location
+							props.Doc = freshProps.Doc
+							continue
+						}
+					}
+
 					time.Sleep(150 * time.Millisecond)
 				}
 
