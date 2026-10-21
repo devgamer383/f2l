@@ -148,7 +148,7 @@ func (v *VirtualStreamEngine) GetVirtualMetadata(ctx context.Context, batchToken
 		return nil, fmt.Errorf("telegram client is not ready")
 	}
 
-	ch, err := v.pool.Resolver().GetInputChannel(ctx, primary.API)
+	ch, err := v.pool.Resolver().GetInputChannel(ctx, primary.GetAPI())
 	if err != nil {
 		return nil, fmt.Errorf("resolve storage channel: %w", err)
 	}
@@ -165,7 +165,7 @@ func (v *VirtualStreamEngine) GetVirtualMetadata(ctx context.Context, batchToken
 			for _, id := range chunk {
 				inputMsgs = append(inputMsgs, &tg.InputMessageID{ID: id})
 			}
-			res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			res, err := primary.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 				Channel: ch,
 				ID:      inputMsgs,
 			})

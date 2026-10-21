@@ -56,12 +56,12 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 		return nil, fmt.Errorf("telegram client is not ready")
 	}
 
-	ch, err := e.pool.Resolver().GetInputChannel(ctx, primary.API)
+	ch, err := e.pool.Resolver().GetInputChannel(ctx, primary.GetAPI())
 	if err != nil {
 		return nil, fmt.Errorf("resolve storage channel: %w", err)
 	}
 
-	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+	res, err := primary.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 		Channel: ch,
 		ID: []tg.InputMessageClass{
 			&tg.InputMessageID{ID: messageID},
@@ -99,20 +99,27 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 
 // RefreshFileProperties bypasses the cache to fetch fresh FileReferences from Telegram
 func (e *FastStreamEngine) RefreshFileProperties(ctx context.Context, messageID int) (*telegram.FileProperties, error) {
-	primary := e.pool.Primary()
-	if primary == nil || !primary.IsReady.Load() {
-		primary = e.pool.NextWorker()
+	return e.RefreshFilePropertiesClient(ctx, nil, messageID)
+}
+
+// RefreshFilePropertiesClient fetches fresh FileReferences specifically bound to the client's session
+func (e *FastStreamEngine) RefreshFilePropertiesClient(ctx context.Context, client *telegram.WorkerClient, messageID int) (*telegram.FileProperties, error) {
+	if client == nil || client.GetAPI() == nil || !client.IsReady.Load() {
+		client = e.pool.Primary()
+		if client == nil || !client.IsReady.Load() {
+			client = e.pool.NextWorker()
+		}
 	}
-	if primary == nil {
+	if client == nil || client.GetAPI() == nil {
 		return nil, fmt.Errorf("no ready telegram client available")
 	}
 
-	ch, err := e.pool.Resolver().GetInputChannel(ctx, primary.API)
+	ch, err := e.pool.Resolver().GetInputChannel(ctx, client.GetAPI())
 	if err != nil {
 		return nil, fmt.Errorf("resolve storage channel: %w", err)
 	}
 
-	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+	res, err := client.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 		Channel: ch,
 		ID: []tg.InputMessageClass{
 			&tg.InputMessageID{ID: messageID},
@@ -271,13 +278,7 @@ func (e *FastStreamEngine) StreamFileRange(
 
 				activeClient := botClient
 				for attempt := 1; attempt <= 4; attempt++ {
-					if attempt > 1 || !activeClient.IsReady.Load() {
-						if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
-							activeClient = next
-						}
-					}
-
-					res, fetchErr = activeClient.API.UploadGetFile(workerCtx, req)
+					res, fetchErr = activeClient.GetAPI().UploadGetFile(workerCtx, req)
 					if fetchErr == nil && res != nil {
 						botClient = activeClient
 						break
@@ -286,15 +287,26 @@ func (e *FastStreamEngine) StreamFileRange(
 						return
 					}
 
-					// Auto-refresh expired Telegram file references from channel
+					// Auto-refresh expired Telegram file references directly for activeClient
 					if strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
-						slog.Info("Telegram file reference expired, fetching fresh reference...", "file_id", fileID, "chunk", curOffsetChunk)
-						freshProps, refErr := e.RefreshFileProperties(workerCtx, fileID)
+						slog.Info("Telegram file reference expired, fetching fresh reference...", "file_id", fileID, "bot_id", activeClient.ID, "chunk", curOffsetChunk)
+						freshProps, refErr := e.RefreshFilePropertiesClient(workerCtx, activeClient, fileID)
 						if refErr == nil && freshProps != nil && freshProps.Location != nil {
 							req.Location = freshProps.Location
 							props.Location = freshProps.Location
 							props.Doc = freshProps.Doc
+							// Retry immediately with the same client that holds the fresh reference
 							continue
+						}
+					}
+
+					// If engine forcibly closed or client disconnected, rotate to next ready worker
+					if strings.Contains(fetchErr.Error(), "engine forcibly closed") || !activeClient.IsReady.Load() {
+						if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
+							activeClient = next
+							if freshProps, refErr := e.RefreshFilePropertiesClient(workerCtx, activeClient, fileID); refErr == nil && freshProps != nil && freshProps.Location != nil {
+								req.Location = freshProps.Location
+							}
 						}
 					}
 

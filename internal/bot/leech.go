@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/big"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -152,8 +153,22 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	slog.Info("Sent initial leech status message", "status_msg_id", statusMsgID)
 
 
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
 	client := &http.Client{
-		Timeout: 0, // No global timeout for large streaming transfers
+		Transport: transport,
+		Timeout:   0, // No global timeout for large streaming transfers
 	}
 
 	// 1. Inspect URL with HEAD first, fallback to GET Range 0-1024
@@ -285,17 +300,21 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		var downloaded atomic.Int64
 
 		primary := b.pool.Primary()
-		if _, err := b.pool.Resolver().GetInputChannel(ctx, primary.API); err != nil {
+		if _, err := b.pool.Resolver().GetInputChannel(ctx, primary.GetAPI()); err != nil {
 			b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Storage channel error: %s", err))
 			return
 		}
 
 		var sendRes tg.UpdatesClass
-		for attempt := 1; attempt <= 4; attempt++ {
+		for attempt := 1; attempt <= 6; attempt++ {
 			worker := primary
 			if attempt > 1 {
 				worker = b.pool.NextWorker()
 				time.Sleep(2 * time.Second)
+			}
+			for !worker.IsReady.Load() {
+				time.Sleep(500 * time.Millisecond)
+				worker = b.pool.NextWorker()
 			}
 			downloaded.Store(0)
 
@@ -325,7 +344,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			upload := uploader.NewUpload(filename, pw, totalSize)
-			u := uploader.NewUploader(worker.API).WithThreads(16).WithPartSize(512 * 1024)
+			u := uploader.NewUploader(worker.GetAPI()).WithThreads(8).WithPartSize(512 * 1024)
 			inputFile, upErr := u.Upload(ctx, upload)
 			_ = dlResp.Body.Close()
 
@@ -334,7 +353,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 				continue
 			}
 
-			wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.API)
+			wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.GetAPI())
 			if chErr != nil || wCh == nil {
 				slog.Warn("Could not resolve storage channel for worker", "worker_id", worker.ID, "err", chErr)
 				continue
@@ -346,7 +365,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			capText, capEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s`\n📦 `%s`", filename, telegram.FormatBytes(totalSize)))
-			res, sendErr := worker.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			res, sendErr := worker.GetAPI().MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 				Peer: &tg.InputPeerChannel{
 					ChannelID:  wCh.ChannelID,
 					AccessHash: wCh.AccessHash,
@@ -409,6 +428,11 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	// Case 2: Multi-Bot Parallel Zero-Disk Leech (> 2GB to 30GB+)
 	// -------------------------------------------------------------------
 	activeWorkers := numBots
+	if activeWorkers > 4 {
+		// Limit concurrent slice streams to 4 to prevent remote server HTTP 429 rate limits,
+		// while rotating work seamlessly across all 8 bots in the pool
+		activeWorkers = 4
+	}
 	if numParts < activeWorkers {
 		activeWorkers = numParts
 	}
@@ -436,7 +460,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	)
 
 	primary := b.pool.Primary()
-	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
+	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.GetAPI())
 	if err != nil {
 		b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Storage channel error: %s", err))
 		return
@@ -453,6 +477,11 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			jobChan <- partJob{index: i}
 		}
 		close(jobChan)
+
+		threadsPerWorker := 4
+		if activeWorkers <= 2 {
+			threadsPerWorker = 8
+		}
 
 		var wg sync.WaitGroup
 		for wIdx := 0; wIdx < activeWorkers; wIdx++ {
@@ -479,11 +508,19 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 					slog.Info("Starting zero-disk slice stream", "part", partNum, "of", numParts, "start", partStart, "end", partEnd, "len", partLen, "bot", bNum)
 
-					for attempt := 1; attempt <= 4; attempt++ {
+					for attempt := 1; attempt <= 6; attempt++ {
 						w := wClient
-						if attempt > 1 {
+						if attempt > 1 || !w.IsReady.Load() {
 							w = b.pool.NextWorker()
-							time.Sleep(2 * time.Second)
+							time.Sleep(time.Duration(attempt) * time.Second)
+						}
+						for !w.IsReady.Load() {
+							select {
+							case <-ctx.Done():
+								return
+							case <-time.After(500 * time.Millisecond):
+								w = b.pool.NextWorker()
+							}
 						}
 						partProgress[partIdx].Store(0)
 
@@ -498,10 +535,17 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 
 						pResp, err := client.Do(pReq)
 						if err != nil || (pResp.StatusCode != http.StatusPartialContent && pResp.StatusCode != http.StatusOK) {
+							statusCode := 0
 							if pResp != nil {
+								statusCode = pResp.StatusCode
 								_ = pResp.Body.Close()
 							}
-							slog.Warn("Range stream connect failed", "part", partNum, "attempt", attempt, "err", err)
+							slog.Warn("Range stream connect failed", "part", partNum, "attempt", attempt, "status", statusCode, "err", err)
+							backoffSec := attempt * 3
+							if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
+								backoffSec = attempt * 6
+							}
+							time.Sleep(time.Duration(backoffSec) * time.Second)
 							continue
 						}
 
@@ -523,7 +567,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 						}
 
 						upload := uploader.NewUpload(partFilename, pw, partLen)
-						u := uploader.NewUploader(w.API).WithThreads(16).WithPartSize(512 * 1024)
+						u := uploader.NewUploader(w.GetAPI()).WithThreads(threadsPerWorker).WithPartSize(512 * 1024)
 						inputFile, uploadErr := u.Upload(ctx, upload)
 						_ = pResp.Body.Close()
 
@@ -532,14 +576,14 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 							continue
 						}
 
-						wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, w.API)
+						wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, w.GetAPI())
 						if chErr != nil || wCh == nil {
 							slog.Warn("Could not resolve storage channel", "part", partNum, "err", chErr)
 							continue
 						}
 
 						partCap, partEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
-						sRes, sendErr := w.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+						sRes, sendErr := w.GetAPI().MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 							Peer: &tg.InputPeerChannel{
 								ChannelID:  wCh.ChannelID,
 								AccessHash: wCh.AccessHash,
@@ -623,7 +667,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			}
 
 			upload := uploader.NewUpload(partFilename, pw, partLen)
-			u := uploader.NewUploader(worker.API).WithThreads(16).WithPartSize(512 * 1024)
+			u := uploader.NewUploader(worker.GetAPI()).WithThreads(6).WithPartSize(512 * 1024)
 			inputFile, uploadErr := u.Upload(ctx, upload)
 			if uploadErr != nil || inputFile == nil {
 				slog.Warn("Upload stream slice failed", "part", partNum, "err", uploadErr)
@@ -638,8 +682,8 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 				sRes    tg.UpdatesClass
 				sendErr error
 			)
-			for sendAttempt := 1; sendAttempt <= 3; sendAttempt++ {
-				wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.API)
+			for sendAttempt := 1; sendAttempt <= 4; sendAttempt++ {
+				wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, worker.GetAPI())
 				if chErr != nil || wCh == nil {
 					slog.Warn("Could not resolve storage channel", "part", partNum, "err", chErr)
 					time.Sleep(2 * time.Second)
@@ -647,7 +691,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 				}
 
 				pCap, pEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
-				sRes, sendErr = worker.API.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				sRes, sendErr = worker.GetAPI().MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 					Peer: &tg.InputPeerChannel{
 						ChannelID:  wCh.ChannelID,
 						AccessHash: wCh.AccessHash,
@@ -683,7 +727,147 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		}
 	}
 
-	// Verify that all parts uploaded successfully
+	// Bulletproof Recovery Phase: repair any missing slices directly in-RAM before finalizing
+	missingIndices := make([]int, 0)
+	for i, id := range msgIDs {
+		if id <= 0 {
+			missingIndices = append(missingIndices, i)
+		}
+	}
+
+	if len(missingIndices) > 0 {
+		slog.Warn("Entering missing slices recovery phase", "missing_count", len(missingIndices))
+		b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf(
+			"🔄 **Zero-Disk Recovery Engine Activated**\n\n"+
+				"📁 `%s`\n"+
+				"🧩 **Repairing:** `%d/%d missing parts`\n"+
+				"💾 **Disk Usage:** `0 MB (Direct RAM Pipe)`\n"+
+				"⚡ _Finalizing slices into Telegram channel..._",
+			cleanName, len(missingIndices), numParts,
+		))
+
+		for _, partIdx := range missingIndices {
+			select {
+			case <-ctx.Done():
+				b.editStatus(ctx, peer, statusMsgID, "❌ Leech operation canceled by user.")
+				return
+			default:
+			}
+
+			partNum := partIdx + 1
+			partStart := int64(partIdx) * sliceSize
+			partEnd := int64(math.Min(float64(totalSize-1), float64(int64(partIdx+1)*sliceSize-1)))
+			partLen := partEnd - partStart + 1
+			partFilename := fmt.Sprintf("%s.%03d", cleanName, partNum)
+
+			slog.Info("Starting recovery slice stream", "part", partNum, "of", numParts, "start", partStart, "end", partEnd, "len", partLen)
+
+			for recoverAttempt := 1; recoverAttempt <= 8; recoverAttempt++ {
+				select {
+				case <-ctx.Done():
+					b.editStatus(ctx, peer, statusMsgID, "❌ Leech operation canceled by user.")
+					return
+				default:
+				}
+
+				w := b.pool.NextWorker()
+				for !w.IsReady.Load() {
+					time.Sleep(1 * time.Second)
+					w = b.pool.NextWorker()
+				}
+				partProgress[partIdx].Store(0)
+
+				pReq, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+				if err != nil {
+					time.Sleep(2 * time.Second)
+					continue
+				}
+				pReq.Header.Set("User-Agent", UserAgent)
+				pReq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", partStart, partEnd))
+
+				pResp, err := client.Do(pReq)
+				if err != nil || (pResp.StatusCode != http.StatusPartialContent && pResp.StatusCode != http.StatusOK) {
+					statusCode := 0
+					if pResp != nil {
+						statusCode = pResp.StatusCode
+						_ = pResp.Body.Close()
+					}
+					slog.Warn("Recovery range connect failed", "part", partNum, "attempt", recoverAttempt, "status", statusCode, "err", err)
+					backoffSec := recoverAttempt * 4
+					if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
+						backoffSec = recoverAttempt * 7
+					}
+					time.Sleep(time.Duration(backoffSec) * time.Second)
+					continue
+				}
+
+				var currentPartStreamed int64
+				pw := &progressReader{
+					r: pResp.Body,
+					onProgress: func(n int64) {
+						currentPartStreamed += n
+						partProgress[partIdx].Store(currentPartStreamed)
+						var curr int64
+						for i := range partProgress {
+							curr += partProgress[i].Load()
+						}
+						pText := telegram.RenderProgress("⚡ **Zero-Disk Recovery Engine**", cleanName, curr, totalSize, streamStart,
+							fmt.Sprintf("Repairing Part %d/%d (Bot %d)", partNum, numParts, w.ID))
+						updateProgress(pText)
+					},
+				}
+
+				upload := uploader.NewUpload(partFilename, pw, partLen)
+				u := uploader.NewUploader(w.GetAPI()).WithThreads(4).WithPartSize(512 * 1024)
+				inputFile, uploadErr := u.Upload(ctx, upload)
+				_ = pResp.Body.Close()
+
+				if uploadErr != nil || inputFile == nil {
+					slog.Warn("Recovery upload slice failed", "part", partNum, "attempt", recoverAttempt, "err", uploadErr)
+					time.Sleep(3 * time.Second)
+					continue
+				}
+
+				wCh, chErr := b.pool.Resolver().GetInputChannel(ctx, w.GetAPI())
+				if chErr != nil || wCh == nil {
+					slog.Warn("Could not resolve storage channel during recovery", "part", partNum, "err", chErr)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				partCap, partEntities := telegram.ParseMarkdown(fmt.Sprintf("📁 `%s` (Part %d/%d)\n📦 `%s`", partFilename, partNum, numParts, telegram.FormatBytes(partLen)))
+				sRes, sendErr := w.GetAPI().MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+					Peer: &tg.InputPeerChannel{
+						ChannelID:  wCh.ChannelID,
+						AccessHash: wCh.AccessHash,
+					},
+					Media: &tg.InputMediaUploadedDocument{
+						File:     inputFile,
+						MimeType: "video/x-matroska",
+						Attributes: []tg.DocumentAttributeClass{
+							&tg.DocumentAttributeFilename{FileName: partFilename},
+						},
+					},
+					Message:  partCap,
+					Entities: partEntities,
+					RandomID: randInt64(),
+				})
+				if sendErr != nil || sRes == nil {
+					slog.Warn("Send recovery slice media failed", "part", partNum, "err", sendErr)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+
+				if msgID := extractMsgID(sRes); msgID > 0 {
+					msgIDs[partIdx] = msgID
+					slog.Info("Recovery slice successfully saved in channel", "part", partNum, "msg_id", msgID)
+					break
+				}
+			}
+		}
+	}
+
+	// Final verification that all parts uploaded successfully
 	var missingParts []int
 	for i, id := range msgIDs {
 		if id <= 0 {
@@ -692,7 +876,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	}
 
 	if len(missingParts) > 0 {
-		b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Leech aborted: Part(s) %v failed to stream after retries.", missingParts))
+		b.editStatus(ctx, peer, statusMsgID, fmt.Sprintf("❌ Leech aborted: Part(s) %v failed to stream after all recovery attempts.", missingParts))
 		return
 	}
 
@@ -710,7 +894,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 		timelineTag := fmt.Sprintf("[timeline:%s]", joinedIDs)
 		newCap := fmt.Sprintf("📁 `%s`\n📦 `%s` (%d Parts)\n🎬 `%s`", cleanName, telegram.FormatBytes(totalSize), len(validIDs), timelineTag)
 		capText, capEntities := telegram.ParseMarkdown(newCap)
-		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		_, editErr := primary.GetAPI().MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  storageChannel.ChannelID,
 				AccessHash: storageChannel.AccessHash,
@@ -733,7 +917,7 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 			"total_size": totalSize,
 			"parts":      validIDs,
 		})
-		sendRes, sErr := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		sendRes, sErr := primary.GetAPI().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  storageChannel.ChannelID,
 				AccessHash: storageChannel.AccessHash,

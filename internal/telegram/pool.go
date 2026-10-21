@@ -23,6 +23,19 @@ type WorkerClient struct {
 	IsPrimary bool
 	IsReady   atomic.Bool
 	Token     string
+	mu        sync.RWMutex
+}
+
+func (w *WorkerClient) GetAPI() *tg.Client {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.API
+}
+
+func (w *WorkerClient) GetClient() *telegram.Client {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.Client
 }
 
 type BotPool struct {
@@ -67,16 +80,8 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	_ = os.MkdirAll("data", 0755)
 
 	// 1. Initialize Primary Bot with in-memory session
-	primaryOpts := telegram.Options{
-		SessionStorage: &session.StorageMemory{},
-		UpdateHandler:  dispatcher,
-	}
-
-	primaryClient := telegram.NewClient(p.cfg.Telegram.APIID, p.cfg.Telegram.APIHash, primaryOpts)
 	p.primary = &WorkerClient{
 		ID:        0,
-		Client:    primaryClient,
-		API:       primaryClient.API(),
 		IsPrimary: true,
 		Token:     p.cfg.Telegram.BotToken,
 	}
@@ -85,6 +90,20 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	// Launch primary bot in background with auto-reconnection loop
 	go func() {
 		for {
+			if ctx.Err() != nil {
+				return
+			}
+			primaryOpts := telegram.Options{
+				SessionStorage: &session.StorageMemory{},
+				UpdateHandler:  dispatcher,
+			}
+
+			primaryClient := telegram.NewClient(p.cfg.Telegram.APIID, p.cfg.Telegram.APIHash, primaryOpts)
+			p.primary.mu.Lock()
+			p.primary.Client = primaryClient
+			p.primary.API = primaryClient.API()
+			p.primary.mu.Unlock()
+
 			err := primaryClient.Run(ctx, func(runCtx context.Context) error {
 				slog.Info("Authenticating primary bot token...")
 				if _, err := primaryClient.Auth().Bot(runCtx, p.cfg.Telegram.BotToken); err != nil {
@@ -114,9 +133,9 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 			if ctx.Err() != nil {
 				return
 			}
-			slog.Warn("Primary bot connection dropped, reconnecting in 3s...", "error", err)
+			slog.Warn("Primary bot connection dropped, reconnecting with fresh client in 2s...", "error", err)
 			select {
-			case <-time.After(3 * time.Second):
+			case <-time.After(2 * time.Second):
 			case <-ctx.Done():
 				return
 			}
@@ -127,15 +146,8 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 	for i, token := range p.cfg.Telegram.SecondaryBotTokens {
 		workerID := i + 1
 		workerToken := token
-		workerOpts := telegram.Options{
-			SessionStorage: &session.StorageMemory{},
-		}
-
-		workerClient := telegram.NewClient(p.cfg.Telegram.APIID, p.cfg.Telegram.APIHash, workerOpts)
 		worker := &WorkerClient{
 			ID:        workerID,
-			Client:    workerClient,
-			API:       workerClient.API(),
 			IsPrimary: false,
 			Token:     workerToken,
 		}
@@ -146,12 +158,26 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 
 		go func(w *WorkerClient, tok string) {
 			for {
-				err := w.Client.Run(ctx, func(runCtx context.Context) error {
+				if ctx.Err() != nil {
+					return
+				}
+				workerOpts := telegram.Options{
+					SessionStorage: &session.StorageMemory{},
+					NoUpdates:      true,
+				}
+
+				workerClient := telegram.NewClient(p.cfg.Telegram.APIID, p.cfg.Telegram.APIHash, workerOpts)
+				w.mu.Lock()
+				w.Client = workerClient
+				w.API = workerClient.API()
+				w.mu.Unlock()
+
+				err := workerClient.Run(ctx, func(runCtx context.Context) error {
 					slog.Info("Authenticating secondary worker...", "id", w.ID)
-					if _, err := w.Client.Auth().Bot(runCtx, tok); err != nil {
+					if _, err := workerClient.Auth().Bot(runCtx, tok); err != nil {
 						return fmt.Errorf("secondary worker %d auth: %w", w.ID, err)
 					}
-					self, _ := w.Client.Self(runCtx)
+					self, _ := workerClient.Self(runCtx)
 					username := ""
 					if self != nil {
 						username = self.Username
@@ -165,9 +191,9 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 				if ctx.Err() != nil {
 					return
 				}
-				slog.Warn("Secondary worker connection dropped, reconnecting in 3s...", "id", w.ID, "error", err)
+				slog.Warn("Secondary worker connection dropped, reconnecting with fresh client in 2s...", "id", w.ID, "error", err)
 				select {
-				case <-time.After(3 * time.Second):
+				case <-time.After(2 * time.Second):
 				case <-ctx.Done():
 					return
 				}

@@ -221,14 +221,14 @@ func (b *Bot) handleIncomingMedia(ctx context.Context, peer tg.InputPeerClass, m
 		return
 	}
 
-	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
+	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.GetAPI())
 	if err != nil {
 		slog.Error("Storage channel error", "error", err)
 		return
 	}
 
 	// Copy message to storage channel without quoting author (CopyMessage behavior)
-	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+	fwdRes, err := primary.GetAPI().MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: peer,
 		ToPeer: &tg.InputPeerChannel{
 			ChannelID:  storageChannel.ChannelID,
@@ -289,14 +289,14 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 	}
 
 	primary := b.pool.Primary()
-	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.API)
+	storageChannel, err := b.pool.Resolver().GetInputChannel(ctx, primary.GetAPI())
 	if err != nil {
 		b.replyText(ctx, peer, replyToID, "❌ Storage channel error.")
 		return
 	}
 
 	// Copy replied message to storage channel without quoting author (CopyMessage behavior)
-	fwdRes, err := primary.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+	fwdRes, err := primary.GetAPI().MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: peer,
 		ToPeer: &tg.InputPeerChannel{
 			ChannelID:  storageChannel.ChannelID,
@@ -325,7 +325,7 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 		inputMsgs = append(inputMsgs, &tg.InputMessageID{ID: startID + i})
 	}
 
-	res, err := primary.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+	res, err := primary.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 		Channel: storageChannel,
 		ID:      inputMsgs,
 	})
@@ -382,7 +382,7 @@ func (b *Bot) handleMerge(ctx context.Context, peer tg.InputPeerClass, replyToID
 		timelineTag := fmt.Sprintf("[timeline:%s]", joinedIDs)
 		newCap := fmt.Sprintf("📁 `%s`\n📦 `%s` (%d Parts)\n🎬 `%s`", unifiedName, telegram.FormatBytes(totalSize), len(msgIDs), timelineTag)
 		capText, capEntities := telegram.ParseMarkdown(newCap)
-		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		_, editErr := primary.GetAPI().MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  storageChannel.ChannelID,
 				AccessHash: storageChannel.AccessHash,
@@ -429,7 +429,7 @@ func (b *Bot) replyText(ctx context.Context, peer tg.InputPeerClass, replyToID i
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, _ = primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	_, _ = primary.GetAPI().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  cleanMsg,
 		Entities: entities,
@@ -444,7 +444,7 @@ func (b *Bot) replyWithMarkup(ctx context.Context, peer tg.InputPeerClass, reply
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	_, err := primary.GetAPI().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:        peer,
 		Message:     cleanMsg,
 		Entities:    entities,
@@ -454,7 +454,7 @@ func (b *Bot) replyWithMarkup(ctx context.Context, peer tg.InputPeerClass, reply
 	})
 	if err != nil {
 		slog.Warn("Failed to send message with markup, falling back to clean text", "error", err)
-		_, errFallback := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		_, errFallback := primary.GetAPI().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer:     peer,
 			Message:  cleanMsg,
 			Entities: entities,
@@ -473,7 +473,7 @@ func (b *Bot) sendReply(ctx context.Context, peer tg.InputPeerClass, replyToID i
 		return 0, fmt.Errorf("bot not ready")
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	res, err := primary.API.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	res, err := primary.GetAPI().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  cleanMsg,
 		Entities: entities,
@@ -496,7 +496,7 @@ func (b *Bot) editStatus(ctx context.Context, peer tg.InputPeerClass, msgID int,
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, err := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+	_, err := primary.GetAPI().MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 		Peer:     peer,
 		ID:       msgID,
 		Message:  cleanMsg,
@@ -513,7 +513,7 @@ func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, 
 		return
 	}
 	cleanMsg, entities := telegram.ParseMarkdown(text)
-	_, err := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+	_, err := primary.GetAPI().MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 		Peer:        peer,
 		ID:          msgID,
 		Message:     cleanMsg,
@@ -522,7 +522,7 @@ func (b *Bot) editStatusWithMarkup(ctx context.Context, peer tg.InputPeerClass, 
 	})
 	if err != nil {
 		slog.Warn("Failed to edit message with markup, falling back to clean text", "error", err)
-		_, editErr := primary.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		_, editErr := primary.GetAPI().MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
 			Peer:     peer,
 			ID:       msgID,
 			Message:  cleanMsg,
