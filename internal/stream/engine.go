@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -116,7 +115,17 @@ func (e *FastStreamEngine) RefreshFilePropertiesClient(ctx context.Context, clie
 
 	ch, err := e.pool.Resolver().GetInputChannel(ctx, client.GetAPI())
 	if err != nil {
-		return nil, fmt.Errorf("resolve storage channel: %w", err)
+		primary := e.pool.Primary()
+		if primary != nil && primary.IsReady.Load() && primary != client {
+			if pch, perr := e.pool.Resolver().GetInputChannel(ctx, primary.GetAPI()); perr == nil {
+				client = primary
+				ch = pch
+			} else {
+				return nil, fmt.Errorf("resolve storage channel: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("resolve storage channel: %w", err)
+		}
 	}
 
 	res, err := client.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
@@ -175,26 +184,29 @@ func (e *FastStreamEngine) StreamFileRange(
 	}
 
 	chunkSize := int64(e.chunkSize)
-	offsetChunk := startByte / chunkSize
-	totalBytes := endByte - startByte + 1
-	chunksToStream := int(math.Ceil(float64(totalBytes) / float64(chunkSize)))
+	startChunk := startByte / chunkSize
+	endChunk := endByte / chunkSize
+	chunksToStream := int(endChunk - startChunk + 1)
+	offsetChunk := startChunk
 
 	// Check cache if single chunk metadata probe (e.g. video player moov atom)
-	cacheKey := fmt.Sprintf("%d_%d", fileID, offsetChunk)
-	if chunksToStream == 1 {
+	if startChunk == endChunk {
+		cacheKey := fmt.Sprintf("%d_%d", fileID, startChunk)
 		if cached, ok := e.chunkMem.Get(cacheKey); ok {
 			trimStart := startByte % chunkSize
-			chunk := cached[trimStart:]
-			if int64(len(chunk)) > contentLength {
-				chunk = chunk[:contentLength]
-			}
-			if len(chunk) > 0 {
-				_, _ = w.Write(chunk)
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
+			if trimStart < int64(len(cached)) {
+				chunk := cached[trimStart:]
+				if int64(len(chunk)) > contentLength {
+					chunk = chunk[:contentLength]
 				}
+				if len(chunk) > 0 {
+					_, _ = w.Write(chunk)
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+				return nil
 			}
-			return nil
 		}
 	}
 

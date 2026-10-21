@@ -68,6 +68,7 @@ func (s *Server) setupRoutes() {
 
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
 	r.Use(corsMiddleware)
 
 	// Health Check / Ping
@@ -235,8 +236,8 @@ func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
 		}
 
 		err = s.fastStreamer.StreamFileRange(r.Context(), w, fileID, start, end, contentLength, props)
-		if err != nil {
-			slog.Debug("Stream error or client disconnected", "error", err)
+		if err != nil && r.Context().Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+			slog.Error("Stream transmission error", "file_id", fileID, "error", err)
 		}
 	}
 }
