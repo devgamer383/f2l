@@ -464,9 +464,12 @@ func (b *Bot) handleLeech(ctx context.Context, peer tg.InputPeerClass, replyToID
 	// -------------------------------------------------------------------
 	// Case 2: Multi-Bot Parallel Pipelined Leech (> 1.6 GB to 30GB+)
 	// -------------------------------------------------------------------
+	// Scale across all available worker bots in the pool for maximum parallel upload speed
 	activeWorkers := numBots
-	if activeWorkers > 4 {
-		activeWorkers = 4
+	if env := os.Getenv("MAX_CONCURRENT_WORKERS"); env != "" {
+		if maxW, err := strconv.Atoi(env); err == nil && maxW > 0 && maxW < activeWorkers {
+			activeWorkers = maxW
+		}
 	}
 	if numParts < activeWorkers {
 		activeWorkers = numParts
