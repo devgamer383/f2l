@@ -29,6 +29,10 @@ type FastStreamEngine struct {
 	// Key format: fmt.Sprintf("%d:%d", fileID, botID)
 	locCache   map[string]*tg.InputDocumentFileLocation
 	locCacheMu sync.RWMutex
+
+	// In-flight background warming deduplication
+	warming   map[string]bool
+	warmingMu sync.Mutex
 }
 
 func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chunkSize, prefetch int) *FastStreamEngine {
@@ -45,6 +49,7 @@ func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chu
 		prefetch:   prefetch,
 		msgCache:   make(map[int]*telegram.FileProperties),
 		locCache:   make(map[string]*tg.InputDocumentFileLocation),
+		warming:    make(map[string]bool),
 	}
 }
 
@@ -186,6 +191,43 @@ func (e *FastStreamEngine) RefreshLocationForBot(ctx context.Context, client *te
 	}
 
 	return props.Location, nil
+}
+
+// GetCachedLocation returns the cached location for (fileID, botID) if present
+func (e *FastStreamEngine) GetCachedLocation(fileID, botID int) *tg.InputDocumentFileLocation {
+	key := fmt.Sprintf("%d:%d", fileID, botID)
+	e.locCacheMu.RLock()
+	defer e.locCacheMu.RUnlock()
+	return e.locCache[key]
+}
+
+// AsyncWarmLocation resolves and caches the location for a secondary bot in the background
+func (e *FastStreamEngine) AsyncWarmLocation(client *telegram.WorkerClient, fileID int) {
+	if client == nil || client.IsPrimary || client.GetAPI() == nil || !client.IsReady.Load() {
+		return
+	}
+	key := fmt.Sprintf("%d:%d", fileID, client.ID)
+
+	e.warmingMu.Lock()
+	if e.warming[key] {
+		e.warmingMu.Unlock()
+		return
+	}
+	e.warming[key] = true
+	e.warmingMu.Unlock()
+
+	go func() {
+		defer func() {
+			e.warmingMu.Lock()
+			delete(e.warming, key)
+			e.warmingMu.Unlock()
+		}()
+
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		_, _ = e.RefreshLocationForBot(bgCtx, client, fileID)
+	}()
 }
 
 // RefreshFileProperties refreshes primary properties
@@ -333,19 +375,31 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// 2. Obtain session-specific location for this bot
-				loc, locErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props)
-				if locErr != nil && !activeBot.IsPrimary {
-					// Fallback to primary bot if secondary bot fails location lookup
-					activeBot = e.pool.Primary()
-					loc, locErr = e.GetLocationForBot(workerCtx, activeBot, fileID, props)
-				}
-				if locErr != nil {
-					select {
-					case resultChan <- streamChunk{index: idx, err: locErr}:
-					case <-workerCtx.Done():
+				// 2. Instant fast-path: use warm cached location, or immediately fallback to Primary without blocking!
+				loc := e.GetCachedLocation(fileID, activeBot.ID)
+				if loc == nil {
+					if !activeBot.IsPrimary {
+						e.AsyncWarmLocation(activeBot, fileID)
+						activeBot = e.pool.Primary()
 					}
-					return
+					loc = e.GetCachedLocation(fileID, activeBot.ID)
+					if loc == nil && props != nil && props.Location != nil {
+						loc = props.Location
+						e.locCacheMu.Lock()
+						e.locCache[fmt.Sprintf("%d:%d", fileID, activeBot.ID)] = loc
+						e.locCacheMu.Unlock()
+					}
+				}
+				if loc == nil {
+					var locErr error
+					loc, locErr = e.GetLocationForBot(workerCtx, activeBot, fileID, props)
+					if locErr != nil {
+						select {
+						case resultChan <- streamChunk{index: idx, err: locErr}:
+						case <-workerCtx.Done():
+						}
+						return
+					}
 				}
 
 				// 3. Fetch chunk from Telegram MTProto on this bot's socket
