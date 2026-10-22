@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -205,7 +206,32 @@ func (s *Server) handleMediaTransmission(isInline bool) http.HandlerFunc {
 		}
 
 		fileSize := props.Size
-		w.Header().Set("Content-Type", props.MimeType)
+		contentType := props.MimeType
+		if ext := filepath.Ext(filename); ext != "" {
+			switch strings.ToLower(ext) {
+			case ".mkv":
+				contentType = "video/x-matroska"
+			case ".mp4":
+				contentType = "video/mp4"
+			case ".webm":
+				contentType = "video/webm"
+			case ".avi":
+				contentType = "video/x-msvideo"
+			case ".mov":
+				contentType = "video/quicktime"
+			case ".mp3":
+				contentType = "audio/mpeg"
+			case ".m4a":
+				contentType = "audio/mp4"
+			case ".flac":
+				contentType = "audio/flac"
+			default:
+				if m := mime.TypeByExtension(ext); m != "" {
+					contentType = m
+				}
+			}
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -333,7 +359,32 @@ func (s *Server) handleVirtualTransmission(isInline bool) http.HandlerFunc {
 		}
 
 		fileSize := meta.TotalSize
-		w.Header().Set("Content-Type", meta.MimeType)
+		contentType := meta.MimeType
+		if ext := filepath.Ext(filename); ext != "" {
+			switch strings.ToLower(ext) {
+			case ".mkv":
+				contentType = "video/x-matroska"
+			case ".mp4":
+				contentType = "video/mp4"
+			case ".webm":
+				contentType = "video/webm"
+			case ".avi":
+				contentType = "video/x-msvideo"
+			case ".mov":
+				contentType = "video/quicktime"
+			case ".mp3":
+				contentType = "audio/mpeg"
+			case ".m4a":
+				contentType = "audio/mp4"
+			case ".flac":
+				contentType = "audio/flac"
+			default:
+				if m := mime.TypeByExtension(ext); m != "" {
+					contentType = m
+				}
+			}
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 		w.Header().Set("X-Accel-Buffering", "no")

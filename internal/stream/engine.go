@@ -210,18 +210,23 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	// Select ready client: Primary bot has the authenticated MTProto session
-	botClient := e.pool.Primary()
-	if botClient == nil || !botClient.IsReady.Load() {
-		botClient = e.pool.NextWorker()
+	// Select ready workers: stripe chunk requests across all ready bots in the pool
+	availableWorkers := e.pool.GetAvailableWorkers()
+	if len(availableWorkers) == 0 {
+		if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
+			availableWorkers = []*telegram.WorkerClient{primary}
+		} else {
+			return fmt.Errorf("no ready telegram client available")
+		}
 	}
-	if botClient == nil {
-		return fmt.Errorf("no ready telegram client available")
-	}
+	numWorkers := len(availableWorkers)
 
-	concurrency := 4
-	if e.prefetch >= 2 && e.prefetch <= 8 {
+	concurrency := numWorkers
+	if e.prefetch > concurrency {
 		concurrency = e.prefetch
+	}
+	if concurrency > 8 {
+		concurrency = 8
 	}
 	if chunksToStream < concurrency {
 		concurrency = chunksToStream
@@ -252,10 +257,11 @@ func (e *FastStreamEngine) StreamFileRange(
 	resultChan := make(chan streamChunk, concurrency*2)
 	var wg sync.WaitGroup
 
-	// Pipelined workers: multiplex multiple in-flight chunk requests on the warm primary connection
+	// Pipelined workers: multiplex in-flight chunk requests across distinct worker bot connections
 	for w := 0; w < concurrency; w++ {
+		workerBot := availableWorkers[w%numWorkers]
 		wg.Add(1)
-		go func() {
+		go func(wClient *telegram.WorkerClient) {
 			defer wg.Done()
 			for idx := range taskChan {
 				select {
@@ -276,7 +282,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// 2. Fetch chunk from Telegram MTProto on warm persistent connection
+				// 2. Fetch chunk from Telegram MTProto on this worker's dedicated socket
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
 					Location: props.Location,
@@ -288,13 +294,12 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				activeClient := botClient
+				activeClient := wClient
 				for attempt := 1; attempt <= 3; attempt++ {
 					if activeClient == nil || !activeClient.IsReady.Load() || activeClient.GetAPI() == nil {
-						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
-							activeClient = primary
-						} else if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
-							activeClient = next
+						activeClient = e.pool.NextWorker()
+						if activeClient == nil || !activeClient.IsReady.Load() {
+							activeClient = e.pool.Primary()
 						}
 					}
 					if activeClient != nil && activeClient.GetAPI() != nil {
@@ -323,16 +328,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					}
 
 					// Rotate on retry
-					if attempt == 1 {
-						if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() && primary != activeClient {
-							activeClient = primary
-						}
-					} else {
-						if next := e.pool.NextWorker(); next != nil && next.IsReady.Load() {
-							activeClient = next
-						}
-					}
-
+					activeClient = e.pool.NextWorker()
 					time.Sleep(100 * time.Millisecond)
 				}
 
@@ -374,7 +370,7 @@ func (e *FastStreamEngine) StreamFileRange(
 					return
 				}
 			}
-		}()
+		}(workerBot)
 	}
 
 	go func() {
