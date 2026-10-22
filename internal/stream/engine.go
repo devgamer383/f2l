@@ -24,6 +24,11 @@ type FastStreamEngine struct {
 	// Cached message metadata to avoid MTProto lookups on seek
 	msgCache   map[int]*telegram.FileProperties
 	msgCacheMu sync.RWMutex
+
+	// Per-bot file location cache to avoid cross-bot file reference invalidations
+	// Key format: fmt.Sprintf("%d:%d", fileID, botID)
+	locCache   map[string]*tg.InputDocumentFileLocation
+	locCacheMu sync.RWMutex
 }
 
 func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chunkSize, prefetch int) *FastStreamEngine {
@@ -39,6 +44,7 @@ func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chu
 		chunkSize:  chunkSize,
 		prefetch:   prefetch,
 		msgCache:   make(map[int]*telegram.FileProperties),
+		locCache:   make(map[string]*tg.InputDocumentFileLocation),
 	}
 }
 
@@ -93,63 +99,74 @@ func (e *FastStreamEngine) GetFileProperties(ctx context.Context, messageID int)
 	e.msgCache[messageID] = props
 	e.msgCacheMu.Unlock()
 
+	// Seed primary bot location in locCache
+	if props.Location != nil {
+		e.locCacheMu.Lock()
+		e.locCache[fmt.Sprintf("%d:%d", messageID, primary.ID)] = props.Location
+		e.locCacheMu.Unlock()
+	}
+
 	return props, nil
 }
 
-// RefreshFileProperties bypasses the cache to fetch fresh FileReferences from Telegram
-func (e *FastStreamEngine) RefreshFileProperties(ctx context.Context, messageID int) (*telegram.FileProperties, error) {
-	return e.RefreshFilePropertiesClient(ctx, nil, messageID)
-}
-
-// RefreshFilePropertiesClient fetches fresh FileReferences specifically bound to the client's session
-func (e *FastStreamEngine) RefreshFilePropertiesClient(ctx context.Context, client *telegram.WorkerClient, messageID int) (*telegram.FileProperties, error) {
+// GetLocationForBot retrieves a valid InputDocumentFileLocation tied to the specific bot session
+func (e *FastStreamEngine) GetLocationForBot(ctx context.Context, client *telegram.WorkerClient, fileID int, fallbackProps *telegram.FileProperties) (*tg.InputDocumentFileLocation, error) {
 	if client == nil || client.GetAPI() == nil || !client.IsReady.Load() {
 		client = e.pool.Primary()
-		if client == nil || !client.IsReady.Load() {
-			client = e.pool.NextWorker()
-		}
 	}
 	if client == nil || client.GetAPI() == nil {
-		return nil, fmt.Errorf("no ready telegram client available")
+		return nil, fmt.Errorf("no ready telegram client")
+	}
+
+	key := fmt.Sprintf("%d:%d", fileID, client.ID)
+
+	e.locCacheMu.RLock()
+	if loc, ok := e.locCache[key]; ok && loc != nil {
+		e.locCacheMu.RUnlock()
+		return loc, nil
+	}
+	e.locCacheMu.RUnlock()
+
+	// If primary client and fallbackProps has a location, cache and return immediately (fast-start)
+	if client.IsPrimary && fallbackProps != nil && fallbackProps.Location != nil {
+		e.locCacheMu.Lock()
+		e.locCache[key] = fallbackProps.Location
+		e.locCacheMu.Unlock()
+		return fallbackProps.Location, nil
+	}
+
+	return e.RefreshLocationForBot(ctx, client, fileID)
+}
+
+// RefreshLocationForBot fetches a fresh, session-bound FileReference for a specific bot client
+func (e *FastStreamEngine) RefreshLocationForBot(ctx context.Context, client *telegram.WorkerClient, fileID int) (*tg.InputDocumentFileLocation, error) {
+	if client == nil || client.GetAPI() == nil || !client.IsReady.Load() {
+		return nil, fmt.Errorf("bot client not ready")
 	}
 
 	ch, err := e.pool.Resolver().GetInputChannel(ctx, client.GetAPI())
 	if err != nil {
-		primary := e.pool.Primary()
-		if primary != nil && primary.IsReady.Load() && primary != client {
-			if pch, perr := e.pool.Resolver().GetInputChannel(ctx, primary.GetAPI()); perr == nil {
-				client = primary
-				ch = pch
-			} else {
-				return nil, fmt.Errorf("resolve storage channel: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("resolve storage channel: %w", err)
-		}
+		return nil, fmt.Errorf("resolve storage channel for bot %d: %w", client.ID, err)
 	}
 
 	res, err := client.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 		Channel: ch,
 		ID: []tg.InputMessageClass{
-			&tg.InputMessageID{ID: messageID},
+			&tg.InputMessageID{ID: fileID},
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("refresh message %d: %w", messageID, err)
+		return nil, fmt.Errorf("get message %d on bot %d: %w", fileID, client.ID, err)
 	}
 
 	modified, ok := res.AsModified()
-	if !ok {
-		return nil, fmt.Errorf("message %d returned unmodified", messageID)
-	}
-	messages := modified.GetMessages()
-	if len(messages) == 0 {
-		return nil, fmt.Errorf("message %d not found", messageID)
+	if !ok || len(modified.GetMessages()) == 0 {
+		return nil, fmt.Errorf("message %d not found on bot %d", fileID, client.ID)
 	}
 
-	msg, ok := messages[0].(*tg.Message)
+	msg, ok := modified.GetMessages()[0].(*tg.Message)
 	if !ok {
-		return nil, fmt.Errorf("message %d is not a valid message", messageID)
+		return nil, fmt.Errorf("message %d invalid on bot %d", fileID, client.ID)
 	}
 
 	props, err := telegram.GetFileProperties(msg)
@@ -157,11 +174,38 @@ func (e *FastStreamEngine) RefreshFilePropertiesClient(ctx context.Context, clie
 		return nil, err
 	}
 
-	e.msgCacheMu.Lock()
-	e.msgCache[messageID] = props
-	e.msgCacheMu.Unlock()
+	key := fmt.Sprintf("%d:%d", fileID, client.ID)
+	e.locCacheMu.Lock()
+	e.locCache[key] = props.Location
+	e.locCacheMu.Unlock()
 
-	return props, nil
+	if client.IsPrimary {
+		e.msgCacheMu.Lock()
+		e.msgCache[fileID] = props
+		e.msgCacheMu.Unlock()
+	}
+
+	return props.Location, nil
+}
+
+// RefreshFileProperties refreshes primary properties
+func (e *FastStreamEngine) RefreshFileProperties(ctx context.Context, messageID int) (*telegram.FileProperties, error) {
+	primary := e.pool.Primary()
+	if primary == nil || !primary.IsReady.Load() {
+		return nil, fmt.Errorf("primary bot not ready")
+	}
+	loc, err := e.RefreshLocationForBot(ctx, primary, messageID)
+	if err != nil {
+		return nil, err
+	}
+	e.msgCacheMu.RLock()
+	props := e.msgCache[messageID]
+	e.msgCacheMu.RUnlock()
+	if props != nil {
+		props.Location = loc
+		return props, nil
+	}
+	return e.GetFileProperties(ctx, messageID)
 }
 
 func (e *FastStreamEngine) StreamFileRange(
@@ -189,7 +233,7 @@ func (e *FastStreamEngine) StreamFileRange(
 	chunksToStream := int(endChunk - startChunk + 1)
 	offsetChunk := startChunk
 
-	// Check cache if single chunk metadata probe (e.g. video player moov atom)
+	// Check cache if single chunk metadata probe (e.g. video player moov atom or cues)
 	if startChunk == endChunk {
 		cacheKey := fmt.Sprintf("%d_%d", fileID, startChunk)
 		if cached, ok := e.chunkMem.Get(cacheKey); ok {
@@ -210,8 +254,8 @@ func (e *FastStreamEngine) StreamFileRange(
 		}
 	}
 
-	// Select ready workers: stripe chunk requests across all ready bots in the pool
-	availableWorkers := e.pool.GetAvailableWorkers()
+	// Select verified download workers (bots ready AND have confirmed channel access)
+	availableWorkers := e.pool.GetDownloadWorkers()
 	if len(availableWorkers) == 0 {
 		if primary := e.pool.Primary(); primary != nil && primary.IsReady.Load() {
 			availableWorkers = []*telegram.WorkerClient{primary}
@@ -221,11 +265,16 @@ func (e *FastStreamEngine) StreamFileRange(
 	}
 	numWorkers := len(availableWorkers)
 
+	// Determine concurrency:
+	// If 1 bot, pipeline 4-8 chunk requests on its socket for high throughput.
+	// If multiple bots, distribute 1 worker goroutine per bot up to min(numWorkers, 8).
 	concurrency := numWorkers
-	if e.prefetch > concurrency {
-		concurrency = e.prefetch
-	}
-	if concurrency > 8 {
+	if concurrency == 1 {
+		concurrency = 4
+		if e.prefetch >= 4 && e.prefetch <= 8 {
+			concurrency = e.prefetch
+		}
+	} else if concurrency > 8 {
 		concurrency = 8
 	}
 	if chunksToStream < concurrency {
@@ -257,12 +306,14 @@ func (e *FastStreamEngine) StreamFileRange(
 	resultChan := make(chan streamChunk, concurrency*2)
 	var wg sync.WaitGroup
 
-	// Pipelined workers: multiplex in-flight chunk requests across distinct worker bot connections
+	// Pipelined workers: multiplex in-flight chunk requests
 	for w := 0; w < concurrency; w++ {
 		workerBot := availableWorkers[w%numWorkers]
 		wg.Add(1)
-		go func(wClient *telegram.WorkerClient) {
+		go func(assignedBot *telegram.WorkerClient) {
 			defer wg.Done()
+			activeBot := assignedBot
+
 			for idx := range taskChan {
 				select {
 				case <-workerCtx.Done():
@@ -282,10 +333,25 @@ func (e *FastStreamEngine) StreamFileRange(
 					continue
 				}
 
-				// 2. Fetch chunk from Telegram MTProto on this worker's dedicated socket
+				// 2. Obtain session-specific location for this bot
+				loc, locErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props)
+				if locErr != nil && !activeBot.IsPrimary {
+					// Fallback to primary bot if secondary bot fails location lookup
+					activeBot = e.pool.Primary()
+					loc, locErr = e.GetLocationForBot(workerCtx, activeBot, fileID, props)
+				}
+				if locErr != nil {
+					select {
+					case resultChan <- streamChunk{index: idx, err: locErr}:
+					case <-workerCtx.Done():
+					}
+					return
+				}
+
+				// 3. Fetch chunk from Telegram MTProto on this bot's socket
 				chunkOffsetBytes := curOffsetChunk * chunkSize
 				req := &tg.UploadGetFileRequest{
-					Location: props.Location,
+					Location: loc,
 					Offset:   chunkOffsetBytes,
 					Limit:    int(chunkSize),
 					Precise:  true,
@@ -294,16 +360,12 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				activeClient := wClient
 				for attempt := 1; attempt <= 3; attempt++ {
-					if activeClient == nil || !activeClient.IsReady.Load() || activeClient.GetAPI() == nil {
-						activeClient = e.pool.NextWorker()
-						if activeClient == nil || !activeClient.IsReady.Load() {
-							activeClient = e.pool.Primary()
-						}
+					if activeBot == nil || !activeBot.IsReady.Load() || activeBot.GetAPI() == nil {
+						activeBot = e.pool.Primary()
 					}
-					if activeClient != nil && activeClient.GetAPI() != nil {
-						res, fetchErr = activeClient.GetAPI().UploadGetFile(workerCtx, req)
+					if activeBot != nil && activeBot.GetAPI() != nil {
+						res, fetchErr = activeBot.GetAPI().UploadGetFile(workerCtx, req)
 						if fetchErr == nil && res != nil {
 							break
 						}
@@ -314,21 +376,29 @@ func (e *FastStreamEngine) StreamFileRange(
 						return
 					}
 
-					// Auto-refresh expired Telegram file references directly for activeClient
+					// Auto-refresh expired Telegram file reference specifically for activeBot
 					if fetchErr != nil && strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
-						slog.Info("Telegram file reference expired, fetching fresh reference...", "file_id", fileID, "bot_id", activeClient.ID, "chunk", curOffsetChunk)
-						freshProps, refErr := e.RefreshFilePropertiesClient(workerCtx, activeClient, fileID)
-						if refErr == nil && freshProps != nil && freshProps.Location != nil {
-							req.Location = freshProps.Location
-							props.Location = freshProps.Location
-							props.Doc = freshProps.Doc
-							// Retry immediately with fresh reference
+						slog.Info("Telegram file reference expired, refreshing...", "file_id", fileID, "bot_id", activeBot.ID, "chunk", curOffsetChunk)
+						freshLoc, refErr := e.RefreshLocationForBot(workerCtx, activeBot, fileID)
+						if refErr == nil && freshLoc != nil {
+							loc = freshLoc
+							req.Location = freshLoc
 							continue
+						}
+						// If secondary bot cannot refresh, switch to Primary bot
+						if !activeBot.IsPrimary {
+							activeBot = e.pool.Primary()
+							if activeBot != nil {
+								pLoc, pErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props)
+								if pErr == nil && pLoc != nil {
+									loc = pLoc
+									req.Location = pLoc
+									continue
+								}
+							}
 						}
 					}
 
-					// Rotate on retry
-					activeClient = e.pool.NextWorker()
 					time.Sleep(100 * time.Millisecond)
 				}
 

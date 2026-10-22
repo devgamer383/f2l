@@ -17,13 +17,14 @@ import (
 )
 
 type WorkerClient struct {
-	ID        int
-	Client    *telegram.Client
-	API       *tg.Client
-	IsPrimary bool
-	IsReady   atomic.Bool
-	Token     string
-	mu        sync.RWMutex
+	ID               int
+	Client           *telegram.Client
+	API              *tg.Client
+	IsPrimary        bool
+	IsReady          atomic.Bool
+	HasChannelAccess atomic.Bool
+	Token            string
+	mu               sync.RWMutex
 }
 
 func (w *WorkerClient) GetAPI() *tg.Client {
@@ -119,6 +120,8 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 				// Resolve storage channel
 				if _, err := p.resolver.GetInputChannel(runCtx, primaryClient.API()); err != nil {
 					slog.Warn("Could not resolve storage channel on startup", "error", err)
+				} else {
+					p.primary.HasChannelAccess.Store(true)
 				}
 
 				p.primary.IsReady.Store(true)
@@ -183,11 +186,20 @@ func (p *BotPool) Start(ctx context.Context, dispatcher tg.UpdateDispatcher) err
 						username = self.Username
 					}
 					w.IsReady.Store(true)
-					slog.Info("✅ Secondary worker ready", "id", w.ID, "username", username)
+
+					// Probe channel access for parallel MTProto downloading
+					if _, err := p.resolver.GetInputChannel(runCtx, workerClient.API()); err == nil {
+						w.HasChannelAccess.Store(true)
+						slog.Info("✅ Secondary worker connected to storage channel for downloading", "id", w.ID, "username", username)
+					} else {
+						w.HasChannelAccess.Store(false)
+						slog.Info("ℹ️ Secondary worker ready for uploading (channel access not needed for uploads)", "id", w.ID, "username", username)
+					}
 					<-runCtx.Done()
 					return nil
 				})
 				w.IsReady.Store(false)
+				w.HasChannelAccess.Store(false)
 				if ctx.Err() != nil {
 					return
 				}
@@ -219,6 +231,23 @@ func (p *BotPool) GetAvailableWorkers() []*WorkerClient {
 		ready = append(ready, p.primary)
 	}
 	return ready
+}
+
+// GetDownloadWorkers returns all ready workers that have verified storage channel access
+func (p *BotPool) GetDownloadWorkers() []*WorkerClient {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var dlWorkers []*WorkerClient
+	for _, w := range p.workers {
+		if w.IsReady.Load() && w.HasChannelAccess.Load() {
+			dlWorkers = append(dlWorkers, w)
+		}
+	}
+	if len(dlWorkers) == 0 && p.primary != nil && p.primary.IsReady.Load() {
+		dlWorkers = append(dlWorkers, p.primary)
+	}
+	return dlWorkers
 }
 
 // NextWorker returns a worker in round-robin fashion for uploading
