@@ -33,6 +33,10 @@ type FastStreamEngine struct {
 	// In-flight background warming deduplication
 	warming   map[string]bool
 	warmingMu sync.Mutex
+
+	// In-flight location resolution deduplication
+	resolving   map[string]chan struct{}
+	resolvingMu sync.Mutex
 }
 
 func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chunkSize, prefetch int) *FastStreamEngine {
@@ -50,6 +54,7 @@ func NewFastStreamEngine(pool *telegram.BotPool, chunkCache *cache.LRUCache, chu
 		msgCache:   make(map[int]*telegram.FileProperties),
 		locCache:   make(map[string]*tg.InputDocumentFileLocation),
 		warming:    make(map[string]bool),
+		resolving:  make(map[string]chan struct{}),
 	}
 }
 
@@ -149,13 +154,38 @@ func (e *FastStreamEngine) RefreshLocationForBot(ctx context.Context, client *te
 		return nil, fmt.Errorf("bot client not ready")
 	}
 
-	ch, err := e.pool.Resolver().GetInputChannel(ctx, client.GetAPI())
+	key := fmt.Sprintf("%d:%d", fileID, client.ID)
+
+	e.resolvingMu.Lock()
+	if waitCh, inProgress := e.resolving[key]; inProgress {
+		e.resolvingMu.Unlock()
+		select {
+		case <-waitCh:
+			if loc := e.GetCachedLocation(fileID, client.ID); loc != nil {
+				return loc, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	ch := make(chan struct{})
+	e.resolving[key] = ch
+	e.resolvingMu.Unlock()
+
+	defer func() {
+		e.resolvingMu.Lock()
+		delete(e.resolving, key)
+		close(ch)
+		e.resolvingMu.Unlock()
+	}()
+
+	inCh, err := e.pool.Resolver().GetInputChannel(ctx, client.GetAPI())
 	if err != nil {
 		return nil, fmt.Errorf("resolve storage channel for bot %d: %w", client.ID, err)
 	}
 
 	res, err := client.GetAPI().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-		Channel: ch,
+		Channel: inCh,
 		ID: []tg.InputMessageClass{
 			&tg.InputMessageID{ID: fileID},
 		},
@@ -179,7 +209,6 @@ func (e *FastStreamEngine) RefreshLocationForBot(ctx context.Context, client *te
 		return nil, err
 	}
 
-	key := fmt.Sprintf("%d:%d", fileID, client.ID)
 	e.locCacheMu.Lock()
 	e.locCache[key] = props.Location
 	e.locCacheMu.Unlock()
@@ -414,7 +443,7 @@ func (e *FastStreamEngine) StreamFileRange(
 				var res tg.UploadFileClass
 				var fetchErr error
 
-				for attempt := 1; attempt <= 3; attempt++ {
+				for attempt := 1; attempt <= 5; attempt++ {
 					if activeBot == nil || !activeBot.IsReady.Load() || activeBot.GetAPI() == nil {
 						activeBot = e.pool.Primary()
 					}
@@ -430,7 +459,34 @@ func (e *FastStreamEngine) StreamFileRange(
 						return
 					}
 
-					// Auto-refresh expired Telegram file reference specifically for activeBot
+					// 1. Handle Telegram FLOOD_WAIT with intelligent backoff & worker rotation
+					if fetchErr != nil && strings.Contains(fetchErr.Error(), "FLOOD_WAIT") {
+						waitSec := 2
+						if idx := strings.Index(fetchErr.Error(), "FLOOD_WAIT"); idx != -1 {
+							sub := fetchErr.Error()[idx:]
+							var parsedSec int
+							if _, sErr := fmt.Sscanf(sub, "FLOOD_WAIT (%d)", &parsedSec); sErr == nil && parsedSec > 0 && parsedSec <= 15 {
+								waitSec = parsedSec
+							}
+						}
+						slog.Warn("Telegram FLOOD_WAIT received, backing off...", "bot_id", activeBot.ID, "wait_sec", waitSec, "chunk", curOffsetChunk)
+						select {
+						case <-time.After(time.Duration(waitSec) * time.Second):
+						case <-workerCtx.Done():
+							return
+						}
+						// Rotate to another ready worker bot if available
+						if alt := e.pool.NextWorker(); alt != nil && alt != activeBot {
+							activeBot = alt
+							if altLoc, lErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props); lErr == nil && altLoc != nil {
+								loc = altLoc
+								req.Location = altLoc
+							}
+						}
+						continue
+					}
+
+					// 2. Auto-refresh expired Telegram file reference specifically for activeBot
 					if fetchErr != nil && strings.Contains(fetchErr.Error(), "FILE_REFERENCE_EXPIRED") {
 						slog.Info("Telegram file reference expired, refreshing...", "file_id", fileID, "bot_id", activeBot.ID, "chunk", curOffsetChunk)
 						freshLoc, refErr := e.RefreshLocationForBot(workerCtx, activeBot, fileID)
@@ -443,8 +499,7 @@ func (e *FastStreamEngine) StreamFileRange(
 						if !activeBot.IsPrimary {
 							activeBot = e.pool.Primary()
 							if activeBot != nil {
-								pLoc, pErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props)
-								if pErr == nil && pLoc != nil {
+								if pLoc, pErr := e.GetLocationForBot(workerCtx, activeBot, fileID, props); pErr == nil && pLoc != nil {
 									loc = pLoc
 									req.Location = pLoc
 									continue
@@ -453,7 +508,11 @@ func (e *FastStreamEngine) StreamFileRange(
 						}
 					}
 
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-time.After(150 * time.Millisecond):
+					case <-workerCtx.Done():
+						return
+					}
 				}
 
 				if fetchErr != nil || res == nil {
